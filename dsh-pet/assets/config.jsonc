@@ -1,6 +1,6 @@
 // dsh-pet 配置（JSONC：允许 // 和 /* */ 注释）
 // 说明：浏览器端启动时通过 /dsh-pet-7340/config.jsonc 拉取；任何字段缺失/写错都会
-//       回退到 client.js 的代码默认值，不会导致插件崩溃。
+//       在加载层显式报错（控制台可见），不做静默兜底——配置是完整的事实来源。
 {
   // ===================== 系统通知总开关 =====================
   // 对话完成 / 生成失败 / 输出截断 / 权限申请 / 用户选择 在窗口失焦时弹出系统级通知（桌面右下角）。
@@ -11,12 +11,17 @@
   // pets 数组定义默认宠物；「设置页 → 添加宠物」的默认模板取 pets[0]（main）。
   // 每个宠物独立：id（标识）、size（宽度 px，高度自动 = size × 9/16）、
   // balanceEnabled（是否启用余额功能：true=触发余额动画+显示余额气泡；false=该宠物完全禁用。
-  //   必填布尔值，缺失即配置错误）、position（corner: 四角之一；marginX/marginY: 距所属角落偏移 px）
+  //   必填布尔值，缺失即配置错误）、display（显示位置，必填四值之一：
+  //   web=仅浏览器 overlay / desktop=仅桌面模式（Electron 透明窗）/ both=两者/ none=都不显示。
+  //   缺失/非法即配置错误——代码不做兜底默认；桌面模式取 display 含 desktop 的第一只宠物，
+  //   其余 desktop/both 宠物暂不参与桌面窗口）、
+  // position（corner: 四角之一；marginX/marginY: 距所属角落偏移 px）
   "pets": [
     {
       "id": "main",
       "size": 462,
       "balanceEnabled": true,
+      "display": "both",
       "position": {
         "corner": "top-right",
         "marginX": 24,

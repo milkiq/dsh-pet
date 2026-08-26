@@ -1,8 +1,9 @@
-// 余额数据层（client 半侧）：拉取 /dsh-pet-7340/balance → 解析 → 档位计算。
-// 纯逻辑模块（不依赖 React/DOM），可独立单测；与 host/balance.ts 的 BalanceResult 结构同构
-// （HTTP 契约两端各自声明，避免 client 打包跨层 import host）。
+// 余额数据层与展示视图（src/shared 纯逻辑，浏览器 bundle 与桌面 shared-core 共用）：
+// 拉取 /dsh-pet-7340/balance → 解析 → 档位计算 → 气泡行数据。
+// 不依赖 React/DOM；host/balance.ts 的 BalanceResult 与本模块的 RawBalanceResult 同构
+// （HTTP 契约两端各自声明，host 无需 import 本目录——DSH 单文件加载约束）。
 
-/** /dsh-pet-7340/balance 响应（与 host/balance.ts 同构；client 按此结构校验） */
+/** /dsh-pet-7340/balance 响应（与 host/balance.ts 同构；两端按此结构校验） */
 export interface RawBalanceResult {
   ok: boolean;
   provider?: string;
@@ -23,7 +24,7 @@ export interface RawBalanceResult {
   };
 }
 
-/** 已解析的余额视图（client 展示 + 档位计算用） */
+/** 已解析的余额视图（展示 + 档位计算用） */
 export interface BalanceView {
   provider: string;
   kind: 'opencode' | 'deepseek';
@@ -55,7 +56,8 @@ export type BalanceState = BalanceView | BalanceUnavailable;
 const TIMEOUT_MS = 20000;
 const RETRIES = 2;
 
-/** 带超时 + 重试的 GET（host 已内置重试，这里再兜底网络抖动） */
+/** 带超时 + 重试的 GET（host 已内置重试，这里再兜底网络抖动）。
+ *  浏览器传默认相对路径；桌面模式（Electron，file:// 页面）传绝对 URL。 */
 async function getWithRetry(url: string): Promise<Response> {
   let last: unknown;
   for (let i = 0; i <= RETRIES; i++) {
@@ -72,10 +74,10 @@ async function getWithRetry(url: string): Promise<Response> {
 }
 
 /** 拉取当前状态的余额；网络/解析失败显式抛错（上层决定报错方式，绝不静默 0） */
-export async function fetchBalanceState(): Promise<BalanceState> {
-  const res = await getWithRetry('/dsh-pet-7340/balance');
+export async function fetchBalanceState(baseUrl: string = '/dsh-pet-7340/balance'): Promise<BalanceState> {
+  const res = await getWithRetry(baseUrl);
   const raw: RawBalanceResult = await res.json().catch(() => null);
-  if (!raw || typeof raw !== 'object') throw new Error('dsh-pet: /dsh-pet-7340/balance 响应非法');
+  if (!raw || typeof raw !== 'object') throw new Error('dsh-pet: 余额响应非法');
 
   const provider = String(raw.provider ?? 'unknown');
   if (raw.ok !== true) {
@@ -88,12 +90,11 @@ export async function fetchBalanceState(): Promise<BalanceState> {
 
   if (raw.kind === 'opencode') {
     const d = raw.data;
-    if (!d || typeof d !== 'object') throw new Error('dsh-pet: /dsh-pet-7340/balance opencode 数据非法');
+    if (!d || typeof d !== 'object') throw new Error('dsh-pet: opencode 数据非法');
     const rolling = Number(d.rolling);
     const weekly = Number(d.weekly);
     const monthly = Number(d.monthly);
-    if (![rolling, weekly, monthly].every(Number.isFinite))
-      throw new Error('dsh-pet: /dsh-pet-7340/balance opencode 百分比非数字');
+    if (![rolling, weekly, monthly].every(Number.isFinite)) throw new Error('dsh-pet: opencode 百分比非数字');
     return {
       provider,
       kind: 'opencode',
@@ -108,7 +109,7 @@ export async function fetchBalanceState(): Promise<BalanceState> {
   }
   if (raw.kind === 'deepseek') {
     const d = raw.data;
-    if (!d || typeof d !== 'object') throw new Error('dsh-pet: /dsh-pet-7340/balance deepseek 数据非法');
+    if (!d || typeof d !== 'object') throw new Error('dsh-pet: deepseek 数据非法');
     return {
       provider,
       kind: 'deepseek',
@@ -119,11 +120,19 @@ export async function fetchBalanceState(): Promise<BalanceState> {
       toppedUp: typeof d.toppedUp === 'string' ? d.toppedUp : undefined,
     };
   }
-  throw new Error('dsh-pet: /dsh-pet-7340/balance kind 非法');
+  throw new Error('dsh-pet: 余额 kind 非法');
+}
+
+/** 手动触发计数（/balance 命令 +1；两个平台同样的 1s 轻量轮询语义）。 */
+export async function fetchTriggerCount(baseUrl: string = '/dsh-pet-7340/balance/trigger'): Promise<number> {
+  const res = await fetch(baseUrl, { cache: 'no-store' });
+  if (!res.ok) return -1;
+  const data = await res.json().catch(() => null);
+  return data && typeof data.count === 'number' ? data.count : -1;
 }
 
 /** DeepSeek 满额基准（¥）：余额 ≥ 该值视为 100%（未消耗），余额按比例折算为已用百分比 */
-const DEEPSEEK_FULL_BALANCE_CNY = 20;
+export const DEEPSEEK_FULL_BALANCE_CNY = 20;
 
 /**
  * 事件档位百分比（已用百分比语义：0 = 未消耗，100 = 耗尽）：
@@ -242,4 +251,49 @@ export function deepseekPricingTier(now: Date = new Date()): PricingTier {
   const hour = Number(pick('hour'));
   if (weekday === 'Sat' || weekday === 'Sun') return 'idle'; // 周末全天低谷
   return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18) ? 'peak' : 'idle';
+}
+
+// ---------- 富余额气泡展示视图（浏览器与桌面共用同一份内容/文案/数学） ----------
+
+/** 气泡行数据：role 决定两端的样式类（浏览器 React span；桌面 DOM div）；tier 用于峰谷着色 */
+export type BalanceBubbleRow =
+  | { role: 'label'; text: string }
+  | { role: 'sub'; text: string }
+  | { role: 'error'; text: string }
+  | { role: 'tier'; tier: PricingTier; text: string };
+
+/**
+ * 把 BalanceState 渲染成气泡行数据（纯函数，不碰 DOM/React）：
+ * - opencode：两行 —— 「5h/周/月」额度已用 N% + 重置倒计时
+ * - deepseek：一行 —— 余额（峰/谷）¥x.xx（峰红/谷绿由 role:'tier' 表达）
+ * - 无效：显式展示不可用原因，绝不伪造数字
+ */
+export function balanceBubbleView(state: BalanceState): BalanceBubbleRow[] {
+  if (state.ok) {
+    if (state.kind === 'opencode') {
+      const w = urgentWindow(state);
+      if (w) {
+        const reset = resetInText(w.resetsAt);
+        const rows: BalanceBubbleRow[] = [
+          { role: 'label', text: w.label + '额度已用 ' + Math.round(w.percent) + '%' },
+          { role: 'sub', text: reset ? reset + '重置' : '已重置' },
+        ];
+        return rows;
+      }
+      return [{ role: 'label', text: '额度数据不可用' }];
+    }
+    const tier = deepseekPricingTier();
+    return [
+      { role: 'label', text: '余额（' },
+      { role: 'tier', tier, text: tier === 'peak' ? '峰' : '谷' },
+      { role: 'label', text: '）¥' + (state.total ?? '-') },
+    ];
+  }
+  const msg =
+    state.reason === 'unsupported'
+      ? '当前服务商暂不支持余额查询'
+      : state.reason === 'credential-missing'
+        ? '缺少凭证：' + (state.message ?? '')
+        : '余额查询失败';
+  return [{ role: 'error', text: msg }];
 }

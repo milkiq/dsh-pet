@@ -1,9 +1,21 @@
 // 与 config.jsonc 结构完全同构的类型模型（唯一事实来源 = config.jsonc 的
-// animations / animationWeights / pets）。运行时（ANIM / 设置页 / PetCard）
-// 直接使用这套结构，不额外造转换后的类型。
+// animations / animationWeights / pets）。运行时（浏览器 PetCard / 桌面 sprite /
+// 设置页）直接使用这套结构，不额外造转换后的类型。
+//
+// 本目录（src/shared）是浏览器 bundle 与桌面 shared-core（构建产物）共用的
+// 纯逻辑层：无 React / DOM 依赖，两边各有一层薄壳做渲染与输入绑定。
 
 /** 支持的角落 */
 export type Corner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+/**
+ * 宠物的显示位置（四个值，必填）：
+ * - web     = 只显示在浏览器 overlay
+ * - desktop = 只显示在桌面模式（Electron 透明窗）
+ * - both    = 两者都显示
+ * - none    = 都不显示（保留配置但不参与显示）
+ */
+export type PetDisplay = 'web' | 'desktop' | 'both' | 'none';
 
 /** 移动动作：一个动作名 + 可选覆盖参数（未写字段取 moves.default） */
 export interface MoveSpec {
@@ -52,12 +64,14 @@ export interface Pet {
   size: number;
   /** 是否启用余额功能：true=触发余额动画+显示余额气泡；false=该宠物完全禁用余额。缺失即配置错误 */
   balanceEnabled: boolean;
+  /** 显示位置（web/desktop/both/none，必填）：缺失即配置错误，代码不做兜底 */
+  display: PetDisplay;
   position: { corner: Corner; marginX: number; marginY: number };
 }
 
 /** config.jsonc 全集——运行时直接使用（ANIM 即本类型） */
 export interface ClientConfig {
-  /** 系统通知总开关：true=对话完成/生成失败/输出截断/权限申请/用户选择在窗口失焦时弹出系统通知；缺失即配置错误 */
+  /** 系统通知总开关：true=对话完成/生成失败/输出截断/权限申请/用户选择时弹出系统通知；缺失即配置错误 */
   notificationsEnabled: boolean;
   pets: Pet[];
   animations: Animations;

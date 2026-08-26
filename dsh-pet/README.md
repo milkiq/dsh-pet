@@ -19,15 +19,31 @@
 ## 🚀 快速开始（安装插件）
 
 ```sh
-dsh plugin --profile web add dsh-pet          # 默认：Chrome/Edge/Firefox 版（webm）
-dsh plugin --profile web add dsh-pet@hevc     # Safari 版（HEVC-alpha mov）
+dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-alpha）
 ```
 
 重启 `dsh web`，宠物出现在界面右下角——全部透明动画开箱即用，无需任何生成流程。
 
-> 💡 版本与格式绑定（发布期注入，无运行时浏览器判断）：`latest` 版内置 `.webm`（VP9-alpha），`hevc` 版内置 `.mov`（HEVC with Alpha）。Safari 请装 `@hevc` 版，否则黑底。
+> 💡 单一格式（发布期注入，无运行时浏览器判断）：只内置 `.webm`（VP9-alpha），浏览器 Chrome/Edge/Firefox 与桌面模式（Electron=Chromium）共用。Safari 不认 webm alpha（黑底）；需要 Safari/HEVC 兼容请 fork 仓库启用保留的流水线（`scripts/encode_hevc_alpha.sh` + `hevc-alpha.yml`）并自行在宿主路由加回 `.mov` 分支（`src/host/index.ts` 的 thumb 路由），插件本体不发布、不支持 `.mov`。
 
 > 💡 想自己造一只专属宠物？克隆 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 仓库，用内置素材链（AI 提示词 → 绿幕视频 → 透明动画，素材由豆包生成）从零生成，全流程可复现。
+
+## 🪟 桌面模式（脱离浏览器，可选）
+
+默认情况下宠物住在 DSH 网页里（浏览器 overlay）。安装后还会**自动拉起一个脱离浏览器的桌面形态**：
+
+- **独立透明置顶窗口**：全屏透明画布（不含任务栏），宠物在画布内自由移动 / 漫游 / 拖拽，不占用网页界面；宠物区域外**点击穿透**到下层应用
+- **与浏览器严格同行为**（同一份源码两个外壳）：宠物功能/文案完全对齐——多开宠物同屏显示、角落+边距定位、同一动画链/点击/拖拽/余额档位动画与富余额气泡；**页面配置的显示位置由 `display` 字段决定，两端宠物内容只可能一致，不会出现"一个有另一个没有"**。系统通知是独立于宠物的能力（见下），不在此列
+- **共享纯逻辑**：待机选择 / 移动几何 / 余额折算 / 配置校验 / 通知映射都在 `src/shared/`，浏览器 bundle 与桌面 `shared-core.js`（构建产物，`window.PetShared`）共用同一份源码，只有最外层的渲染壳不同（React vs 纯 DOM）
+
+### 桌面模式怎么装 / 关
+
+- **依赖 Electron**：首次拉起时自动探测（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到会尝试自动下载到 `~/.dsh/electron/`（`npm run ensure:electron` 可手动触发）；Electron 不可用时仅日志告警，**不影响浏览器形态**
+- **开关 = 每只宠物的 `display` 字段（pets 必填，四个值）**：
+  - `web` = 仅浏览器 overlay / `desktop` = 仅桌面模式 / `both` = 两者都显示 / `none` = 都不显示
+  - 桌面模式渲染 `display` 含 `desktop` 的**全部**宠物（多开同屏，与浏览器一致）；大小/位置各自读自己的配置
+  - 在 DSH 设置页「桌宠配置」编辑，保存即时生效；`display` 缺失/非法即配置错误，**代码不做兜底**
+- 桌面与浏览器是**同一套动画素材**（`/dsh-pet-7340/thumb/<name>.webm`，用户 `main-animation/` 目录同样优先）；配置加载失败会**大声报错**（红色错误条 + 每 5 秒自动重试），绝不静默兜底
 
 ## ✨ 功能特性
 
@@ -43,10 +59,10 @@ dsh plugin --profile web add dsh-pet@hevc     # Safari 版（HEVC-alpha mov）
 
 ## ⚙️ 配置
 
-| 配置项                 | 说明                                                                                                                                            |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| 设置页「桌宠配置」     | DSH 设置 → 桌宠配置：图形化编辑**大小 / 位置 / 边距**，支持**多开**（添加/删除宠物，每只独立配置）；保存**即时生效**，恢复默认回落 config.jsonc |
-| `pets`（config.jsonc） | 默认宠物列表：`[{ "id", "size", "position": { "corner", "marginX", "marginY" } }]`；多只即多开，首只为「添加宠物」的默认模板                    |
+| 配置项                 | 说明                                                                                                                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 设置页「桌宠配置」     | DSH 设置 → 桌宠配置：图形化编辑**大小 / 位置 / 边距**，支持**多开**（添加/删除宠物，每只独立配置）；保存**即时生效**，恢复默认回落 config.jsonc                                                                                                                                      |
+| `pets`（config.jsonc） | 默认宠物列表：`[{ "id", "size", "balanceEnabled", "display", "position": { "corner", "marginX", "marginY" } }]`；`display` 为 web/desktop/both/none（必填，缺失即配置错误）；多只即多开，`display` 含 desktop 的宠物出现在桌面窗口（与浏览器同屏渲染），首只为「添加宠物」的默认模板 |
 
 > 说明：插件安装即用，配置均为可选；设置页保存的用户覆盖写入 `$DSH_HOME/dsh-pet/main-config.json`（用户层，优先于包内默认）。
 
@@ -58,11 +74,11 @@ dsh plugin --profile web add dsh-pet@hevc     # Safari 版（HEVC-alpha mov）
 | ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | 默认配置（只读） | 包内 `assets/config.jsonc`           | 完整结构参考：宠物列表 / 动画池（idle/turn/drag/clicks/moves/categories）/ 播放权重               |
 | 用户配置         | `$DSH_HOME/dsh-pet/main-config.json` | 覆盖片段：可整体覆盖 `pets` / `animations` / `animationWeights`，缺省字段回落默认                 |
-| 用户动画（可选） | `$DSH_HOME/dsh-pet/main-animation/`  | 放入 `.webm` / `.mov` 即可作为动画播放，**优先于包内素材**（按扩展名进 `webm/` 或 `mov/` 子目录） |
+| 用户动画（可选） | `$DSH_HOME/dsh-pet/main-animation/`  | 放入 `.webm`（VP9-Alpha）即可作为动画播放，**优先于包内素材**（放 `main-animation/webm/` 子目录） |
 
 - 设置页底部会显示这些路径
-- 自定义动画：把 `xxx.webm`（或 `xxx.mov`）放进 `main-animation/webm/`（或 `main-animation/mov/`），在动画池/分类里写 `"xxx"`，**刷新页面**即可（无需重启 DSH）
-- 格式：`.webm` 需 **VP9 Alpha** 编码（Chrome/Edge/Firefox）；`.mov` 需 **HEVC with Alpha**（Safari，hvc1 tag）——均与包内素材同规范，普通编码会有黑底
+- 自定义动画：把 `xxx.webm` 放进 `main-animation/webm/`，在动画池/分类里写 `"xxx"`，**刷新页面**即可（无需重启 DSH）
+- 格式：`.webm` 需 **VP9 Alpha** 编码（Chrome/Edge/Firefox），与包内素材同规范，普通编码会有黑底
 - 修改用户配置后同样**刷新页面**生效
 - 动画名请对照默认配置填写，避免引用不存在的动画
 
@@ -94,7 +110,7 @@ dsh plugin --profile web remove dsh-pet
   <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/dsh-pet/assets/preview/beishubiao-tuozhuai-xuankong-fankui.gif" width="160" alt="被鼠标拖拽悬空反馈" title="被鼠标拖拽悬空反馈">
 </p>
 
-全部动画见仓库：`dsh-pet/assets/webm/`（VP9-alpha）与 `dsh-pet/assets/mov/`（HEVC-alpha）。
+全部动画见仓库：`dsh-pet/assets/webm/`（VP9-alpha，唯一发布格式）。
 
 ## 📚 完整项目（不止是插件）
 

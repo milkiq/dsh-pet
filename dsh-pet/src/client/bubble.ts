@@ -1,7 +1,8 @@
 // 余额气泡（client 半侧）：展示当前服务商余额/用量。哑组件——数据由上层传入，
 // 自身不发起请求；工厂形态与 pet.ts 一致（react 由 DSH 运行时注入）。
-import { urgentWindow, resetInText, deepseekPricingTier } from './balance';
-import type { BalanceState } from './balance';
+// 内容（文案/档位/数学）来自 src/shared/balance.ts 的 balanceBubbleView ——
+// 与桌面模式共用同一份行数据，本文件只负责把行数据映射成 React 节点。
+import { balanceBubbleView, type BalanceBubbleRow, type BalanceState } from '../shared/balance';
 import type { ReactNode } from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
@@ -50,62 +51,46 @@ function injectBubbleCss(): void {
   }
 }
 
+/** 行数据 → React 节点（shared 视图的薄壳） */
+function rowsToNodes(h: typeof jsx, rows: BalanceBubbleRow[]): ReactNode {
+  // 含档位段（deepseek 余额单行）：同一行内联渲染，峰/谷着色
+  if (rows.some((r) => r.role === 'tier')) {
+    return h('div', {
+      className: 'pet-bub-row',
+      children: rows.map((r, i) => {
+        if (r.role === 'tier') {
+          return h('span', {
+            key: i,
+            className: 'pet-bub-tier pet-bub-tier-' + r.tier,
+            children: r.text,
+          });
+        }
+        return h('span', { key: i, children: r.text });
+      }),
+    });
+  }
+  // 其余：每行一个块（label 主行 / sub 次要行 / error 错误行）
+  return rows.map((r, i) => {
+    if (r.role === 'error') return h('div', { key: i, className: 'pet-bub-err', children: r.text });
+    if (r.role === 'sub') return h('div', { key: i, className: 'pet-bub-row pet-bub-sub', children: r.text });
+    return h('div', { key: i, className: 'pet-bub-row', children: r.text });
+  });
+}
+
 /**
  * 制造余额气泡（工厂）。
  * 工厂内注入样式一次（与 pet.ts 的 injectCss 同模式）；组件为哑组件，props = { state, on }。
+ * 内容来自 src/shared 的 balanceBubbleView（与桌面模式完全一致）。
  */
 export function makeBalanceBubble(rt: { h: typeof jsx }): (props: { state: BalanceState; on: boolean }) => ReactNode {
   const { h } = rt;
   injectBubbleCss();
 
   return function BalanceBubble({ state, on }: { state: BalanceState; on: boolean }) {
-    const rows: ReactNode[] = [];
-    if (state.ok) {
-      if (state.kind === 'opencode') {
-        // 联想框两行：第一行「周额度已用 88%」，第二行「2.5 天重置」
-        const w = urgentWindow(state);
-        if (w) {
-          const reset = resetInText(w.resetsAt);
-          rows.push(
-            h('div', { className: 'pet-bub-row', children: w.label + '额度已用 ' + Math.round(w.percent) + '%' }),
-          );
-          rows.push(h('div', { className: 'pet-bub-row pet-bub-sub', children: reset ? reset + '重置' : '已重置' }));
-        } else {
-          rows.push(h('div', { className: 'pet-bub-row', children: '额度数据不可用' }));
-        }
-      } else {
-        // DeepSeek：单行「余额（峰/谷）¥x.xx」——按北京时间峰谷价档上色（峰红/谷绿）
-        const tier = deepseekPricingTier();
-        rows.push(
-          h('div', {
-            className: 'pet-bub-row',
-            children: h('span', {
-              children: [
-                '余额（',
-                h('span', {
-                  className: 'pet-bub-tier pet-bub-tier-' + tier,
-                  children: tier === 'peak' ? '峰' : '谷',
-                }),
-                '）¥' + (state.total ?? '-'),
-              ],
-            }),
-          }),
-        );
-      }
-    } else {
-      // 显式展示不可用原因，绝不伪造数字
-      const msg =
-        state.reason === 'unsupported'
-          ? '当前服务商暂不支持余额查询'
-          : state.reason === 'credential-missing'
-            ? '缺少凭证：' + (state.message ?? '')
-            : '余额查询失败';
-      rows.push(h('div', { className: 'pet-bub-err', children: msg }));
-    }
-
+    const rows = balanceBubbleView(state);
     return h('div', {
       className: 'dsh-pet-bubble' + (on ? ' is-on' : ''),
-      children: rows,
+      children: rowsToNodes(h, rows),
     });
   };
 }

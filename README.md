@@ -58,14 +58,23 @@ cd dsh-pet/dsh-pet
 # ② 安装依赖
 npm install
 
-# ③ 构建 + 注入播放格式（webm 版；Safari 用 npm run prepare:mov）
+# ③ 构建 + 注入播放格式（webm，唯一发布格式）
 npm run prepare:webm
 
 # ④ 安装到 DSH（file: 指向本目录，用构建好的 lib）
 dsh plugin --profile web add file:D:/path/to/dsh-pet
 ```
 
-> 注：`prepare:webm` / `prepare:mov` 才产出可安装的 lib（注入播放扩展名）；直接用 `tsdown` 裸构建会留下占位符，动画无法播放。
+> 注：`prepare:webm` 才产出可安装的 lib（注入播放扩展名 `.webm`）；直接用 `tsdown` 裸构建会留下占位符，动画无法播放。
+
+## 🪟 桌面模式（可选，脱离浏览器）
+
+插件内建**双模式**：安装后默认会拉起一个**独立透明置顶窗口**（Electron，全屏画布 + 点击穿透），宠物脱离 DSH 网页界面运行。与浏览器 overlay **严格同行为**——同一份纯逻辑源码（`dsh-pet/src/shared/`），两端的功能/动画/文案/配置完全对齐，不会出现"一个有另一个没有"：
+
+- **依赖**：首次启动自动探测 Electron（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到时自动下载到 `~/.dsh/electron/`（可 `cd dsh-pet && npm run ensure:electron` 手动触发）；缺失时仅日志告警，不影响浏览器形态
+- **开关 = 每只宠物的必填字段 `display`**（四个值）：`web` = 仅浏览器 / `desktop` = 仅桌面 / `both` = 两者 / `none` = 都不显示；桌面模式渲染 display 含 desktop 的**全部**宠物（多开同屏，与浏览器一致）。在 DSH 设置页「桌宠配置」编辑，保存即时生效；缺失即配置错误，代码不做兜底
+- **实现**：浏览器 bundle 与桌面 `shared-core.js`（`src/shared` 的 iife 构建产物，`window.PetShared`）共用同一份纯逻辑；桌面端 `dsh-pet/runtime/electron-helper/` 只是薄壳（Electron 窗口 + 纯 DOM 渲染），行为差异为零
+- 本地调试：`cd dsh-pet && npm run start:desktop -- http://127.0.0.1:3080/dsh-pet-7340/config.jsonc`
 
 ## 从零生成你自己的宠物（完整流程）
 
@@ -110,58 +119,39 @@ python encode_thumbs.py      # 转码 640×360 播放变体 → step04/
 
 > **本项目全部采用路线 B**（97 个动作均为 PR 手工抠像）：对"含第三方物品/透明边缘复杂"的动作，自动 HSV 抠像易残边或误抠，PR 手动遮罩更精细。两条路线产出同一级 `step02/`，后续步骤完全一致；`chroma_step02.py` 保留为自动化兜底，任何动作仍可一键自动生成。
 
-### ②.5 🍎 Safari 版素材（webm → mov，GitHub Actions macOS 流水线）
+### ②.5 🍎 Safari/HEVC 兼容流水线（保留，不参与发布，fork 定制用）
 
-上一步产出的 `step04/` 是 **VP9-alpha webm**（Chrome/Edge/Firefox 原生支持），但 **Safari 不认 webm alpha**（渲染黑底），只支持 **HEVC-with-Alpha mov**——而该编码器（`hevcWithAlpha`，AVFoundation）**只有 macOS 有，Windows/Linux 产不出**。本项目开发机是 Windows，无法本地跑这条编码，所以利用 GitHub Actions 的 **macOS runner 云端批量转码**（`macos-latest`，免费额度，无需自备 Mac）：
+插件自 0.3 起**只发布单一 webm 格式**（VP9-alpha）：浏览器 overlay 的 Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用，无需第二套素材；**宿主端 thumb 路由也已移除 `.mov` 分支**（`dsh-pet/src/host/index.ts`）。Safari 不认 webm alpha（渲染黑底）、只支持 **HEVC-with-Alpha mov**（编码器 `hevcWithAlpha` 仅 macOS 有），需要 Safari 兼容者可 **fork 仓库自行启用**保留的流水线并自行加回 `.mov` 路由：
 
-```sh
-# 手动触发仓库的 hevc-alpha workflow（Settings → Actions → Workflows → Run workflow）
-# mov 由 workflow 用 actions/checkout 拿到本仓库直接编码，与素材同仓，不跨仓库
-```
-
-> 如果你有 Mac（或 macOS 虚拟机），**无需 GitHub Actions**，本地直接跑同样的编码脚本即可：
-> ```sh
-> chmod +x scripts/encode_hevc_alpha.sh
-> ./scripts/encode_hevc_alpha.sh dsh-pet/assets/webm dsh-pet/assets/mov
-> ```
-
-- workflow：`.github/workflows/hevc-alpha.yml`（手动触发 `workflow_dispatch`）
-- 编码脚本：`scripts/encode_hevc_alpha.sh`（ffmpeg 仅解码 webm → BGRA 帧管线 → Swift `hevc_alpha_encoder.swift` 走 AVAssetWriter `hevcWithAlpha` 原生 API）
-- 输入：`dsh-pet/assets/webm/*.webm`；**输出直接写回 `dsh-pet/assets/mov/`**
-- 校验：自动检查产物 `hvc1` tag + alpha 通道真实存在，并打包上传为 artifact（`dsh-pet-hevc-alpha`）
+- workflow：`.github/workflows/hevc-alpha.yml`（手动触发 `workflow_dispatch`，macOS runner 云端批量转码）
+- 编码脚本：`scripts/encode_hevc_alpha.sh`（ffmpeg 解码 webm → BGRA 帧管线 → Swift `hevc_alpha_encoder.swift` 走 AVAssetWriter `hevcWithAlpha` 原生 API）+ `scripts/check_alpha.py`（产物校验）
+- 输入：`dsh-pet/assets/webm/*.webm`；输出写回 `dsh-pet/assets/mov/`（流水线输出目录，不入库不发布）；产物 `hvc1` tag + alpha 校验后打包为 artifact
+- 启用方式：自行把 mov 素材同步进包并恢复双格式支持（`prepare.js` 已收敛为 webm、宿主 thumb 路由已移除 `.mov`，源码历史里都有 mov 分支可参考）
 
 ### ③ 动画 → 插件
 
 ```sh
 # 把 step04 的播放变体同步进插件包（webm 直接 cp）
-cp step04/*.webm dsh-pet/assets/webm/   # Chrome / Edge / Firefox 播放格式（VP9-alpha）
-# Safari 用 HEVC-with-Alpha mov —— 由 GitHub Actions macOS 流水线（见上节 ②.5）自动产出到 dsh-pet/assets/mov/
+cp step04/*.webm dsh-pet/assets/webm/   # 播放格式（VP9-alpha）
 
-# 本地安装插件（webm 版）
+# 本地安装插件
 dsh plugin --profile web add file:D:/path/to/dsh-pet
 ```
 
 > 中间产物（step01-04）由脚本生成、不入仓库；`video/` 源视频和脚本是成果、入库维护。
 
-### 🎯 双格式发布（一个包名，dist-tag 区分）
+### 🎯 发布（单一 webm 格式）
 
-同一 npm 包 `dsh-pet`，按浏览器分两个发布版本（素材目录 `assets/webm` / `assets/mov` 各只打进对应版本，包体各瘦一半）：
+插件只发布一个 npm 包、一个格式（webm），`files` 恒定只带 `assets/webm`（浏览器与桌面模式共用，包体最小）：
 
 ```sh
 cd dsh-pet
-npm run prepare:webm   # 发布 Chrome/Edge/Firefox 版 → dsh-pet@0.2.0，tag latest
-npm run prepare:mov    # 发布 Safari 版（HEVC-alpha）→ dsh-pet@0.2.0-hevc，tag hevc
+npm run prepare:webm   # 构建 + 注入 .webm → 收敛 files 清单（含桌面运行时）
+npm publish --tag latest
 ```
 
-用户按浏览器选装：
-
-```sh
-dsh plugin --profile web add dsh-pet        # Chrome/Edge/Firefox（默认 latest → webm）
-dsh plugin --profile web add dsh-pet@hevc   # Safari（HEVC-alpha mov）
-```
-
-- client 端不做运行时浏览器判断——扩展名由发布期脚本注入（`prepare:webm` → `.webm` / `prepare:mov` → `.mov`），源码共用、产物分格式
-- mov 素材由主仓库内置 workflow `.github/workflows/hevc-alpha.yml` 用 GitHub Actions 云端 macOS（`macos-latest`）编码产出，与素材同仓
+- client 端不做运行时浏览器判断——扩展名由发布期脚本注入（`prepare:webm` → `.webm`）
+- 需要 Safari/HEVC 版：见上方 ②.5，fork 仓库后启用保留的流水线自行定制
 
 ### 项目结构
 
@@ -180,14 +170,13 @@ dsh plugin --profile web add dsh-pet@hevc   # Safari（HEVC-alpha mov）
 ├── dsh-pet/                 # ③ 插件（可独立 npm 发布）
 │   ├── src/                 #   TS 源码（host 半侧 /dsh-pet-7340 路由 + client 半侧动画链）
 │   ├── lib/                 #   tsdown 构建产物（prepare 自动构建，lib/*.js 不入库）
-│   ├── assets/webm/         #   640×360 VP9-alpha 播放动画（Chrome/Edge/Firefox 版素材）
-│   ├── assets/mov/          #   640×360 HEVC-with-Alpha 播放动画（Safari 版素材）
+│   ├── assets/webm/         #   640×360 VP9-alpha 播放动画（Chrome/Edge/Firefox 版素材，唯一发布格式）
 │   ├── assets/preview/      #   GIF 预览（README 展示用，拼音命名）
 │   ├── assets/fonts/        #   气泡/通知字体
 │   ├── assets/pic/          #   通知图标 + 手套光标
 │   ├── assets/config.jsonc  #   默认配置（动画池 / 权重 / 宠物列表，单一事实来源）
 │   ├── scripts/prepack-check.js  # 发布前健康检查
-│   └── scripts/prepare.js   # 发布前微调（构建 + 注入播放格式 .webm/.mov）
+│   └── scripts/prepare.js   # 发布前微调（构建 + 注入播放格式 .webm）
 ├── DESIGN.md                # 设计与实现文档
 └── LICENSE                  # MIT
 ```
@@ -270,7 +259,7 @@ DSH 设置 → 「桌宠配置」：
 
 ## 效果预览
 
-全部动画（640×360，插件实际播放用的资源）——GIF 预览存放于仓库 `dsh-pet/assets/preview/`（raw 直链渲染，文件名采用拼音便于跨平台）；完整透明视频见插件包 `dsh-pet/assets/webm/`（VP9-alpha，Chrome/Edge/Firefox）与 `dsh-pet/assets/mov/`（HEVC-alpha，Safari）：
+全部动画（640×360，插件实际播放用的资源）——GIF 预览存放于仓库 `dsh-pet/assets/preview/`（raw 直链渲染，文件名采用拼音便于跨平台）；完整透明视频见插件包 `dsh-pet/assets/webm/`（VP9-alpha，唯一发布格式）：
 
 **待机 / 转向**
 

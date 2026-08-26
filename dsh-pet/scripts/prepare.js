@@ -1,29 +1,24 @@
 #!/usr/bin/env node
 /**
- * 发布前微调脚本（构建 + 注入播放格式）——发布前最后一步
+ * prepare.js —— 发布前微调（构建 + 注入播放格式）
  *
- * 用法：
- *   node scripts/prepare.js webm     # 构建 + 注入 .webm（Chrome/Edge/Firefox 版）
- *   node scripts/prepare.js mov      # 构建 + 注入 .mov（Safari HEVC-alpha 版）
+ * 插件默认且只发布**单一 webm 格式**（VP9-alpha）：浏览器 overlay 的
+ * Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用同一格式。
+ * Safari/HEVC(mov) 兼容由仓库保留的流水线（scripts/encode_hevc_alpha.sh +
+ * hevc_alpha_encoder.swift + .github/workflows/hevc-alpha.yml）支持——
+ * 需要兼容 Safari 者 fork 仓库后自行启用，不参与本插件的发布流程。
  *
  * 做什么：
  *   1. 构建（npm run bundle：tsdown 把 src/ → lib/）
- *   2. 注入：把 lib/client.js 中的占位符 __PET_EXT__ 替换为实际扩展名
- *      （src/client/pet.ts 里 THUMB_EXT 是占位符，不做运行时浏览器判断，
- *        格式由发布目标决定——本脚本在发布前把它定死）
- *   3. 改写 package.json：
- *      - files 收敛为单格式素材目录（mov → assets/mov；webm → assets/webm）
- *      - version 规范化（mov 加 -hevc 后缀；webm 去掉 -hevc 后缀）
- *      —— 幂等：跑一次即定格为当前格式状态，再跑同格式结果不变，无需备份/恢复
+ *   1.5 构建桌面共享核心（npm run build:desktop-core：src/shared → window.PetShared）
+ *   1.6 生成类型声明（npm run types：tsc → lib/types/*.d.ts）
+ *   2. 注入：把 lib/client.js 中的占位符 __PET_EXT__ 替换为 .webm
+ *      （src/client/pet.ts 里 THUMB_EXT 是占位符，不做运行时浏览器判断）
+ *   3. 改写 package.json：files 收敛为发布清单（含桌面模式运行时 runtime/electron-helper）
+ *      —— 幂等：跑一次即定格为当前状态，再跑结果不变，无需备份/恢复
  *
- * 不做：
- *   - 不发布（npm publish 由你手动执行）
- *   - 不动素材目录
- *
- * 典型发布流程：
- *   node scripts/prepare.js mov
- *   npm publish --tag hevc            # 手动发布 mov 版（Safari）
- *   # 或 npm publish --tag latest     # webm 版（Chrome/Edge/Firefox）
+ * 用法：node scripts/prepare.js（npm run prepare:webm）
+ * 发布：npm publish --tag latest
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -33,12 +28,6 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const CLIENT = join(ROOT, 'lib', 'client.js');
 const PKG = join(ROOT, 'package.json');
-
-const format = process.argv[2];
-if (format !== 'webm' && format !== 'mov') {
-  console.error('usage: node scripts/prepare.js <webm|mov>');
-  process.exit(1);
-}
 
 // 1. 构建 src → lib
 // Windows 下 npm 是 npm.cmd，spawnSync 无法直接执行 .cmd；用 cmd /c 跑整条命令
@@ -51,8 +40,26 @@ if (build.status !== 0) {
   process.exit(1);
 }
 
-// 2. 注入扩展名
-const ext = format === 'mov' ? '.mov' : '.webm';
+// 1.5 构建桌面共享核心（src/shared → window.PetShared 经典 script；与浏览器 bundle 同一份源码）
+console.log('[prepare] building desktop shared-core...');
+const coreRun = process.platform === 'win32' ? 'cmd /c npm run build:desktop-core' : 'npm run build:desktop-core';
+const buildCore = spawnSync(coreRun, { cwd: ROOT, stdio: 'inherit', shell: true });
+if (buildCore.status !== 0) {
+  console.error(`[prepare] 桌面 shared-core 构建失败 (exit ${buildCore.status})`);
+  process.exit(1);
+}
+
+// 1.6 生成类型声明（lib/types/*.d.ts，tsc 产出；构建产物不入 git，克隆后由本步骤补齐）
+console.log('[prepare] generating types (npm run types)...');
+const typesRun = process.platform === 'win32' ? 'cmd /c npm run types' : 'npm run types';
+const buildTypes = spawnSync(typesRun, { cwd: ROOT, stdio: 'inherit', shell: true });
+if (buildTypes.status !== 0) {
+  console.error(`[prepare] 类型声明生成失败 (exit ${buildTypes.status})`);
+  process.exit(1);
+}
+
+// 2. 注入扩展名（单一 .webm）
+const ext = '.webm';
 let src;
 try {
   src = readFileSync(CLIENT, 'utf8');
@@ -68,12 +75,19 @@ if (!src.includes(marker)) {
 writeFileSync(CLIENT, src.split(marker).join(ext), 'utf8');
 console.log(`[prepare] ✓ lib/client.js THUMB_EXT → "${ext}"`);
 
-// 3. 改写 package.json：files 收敛为单格式 + version 规范化（幂等，无备份）
+// 3. 改写 package.json：files 收敛为发布清单（幂等，无备份）
 const pkg = JSON.parse(readFileSync(PKG, 'utf8'));
-const assetDir = format === 'mov' ? 'assets/mov' : 'assets/webm';
-const keep = ['lib', 'src', assetDir, 'assets/fonts', 'assets/pic', 'assets/config.jsonc', 'cordis.patch.yml'];
-const baseVersion = String(pkg.version).replace(/-hevc$/, '');
-const version = format === 'mov' ? `${baseVersion}-hevc` : baseVersion;
-writeFileSync(PKG, JSON.stringify({ ...pkg, version, files: keep }, null, 2) + '\n', 'utf8');
-console.log(`[prepare] ✓ package.json → version ${version}, files=[${keep.join(', ')}]`);
-console.log(`[prepare] ready to publish: npm publish --tag ${format === 'mov' ? 'hevc' : 'latest'}`);
+const keep = [
+  'lib',
+  'src',
+  'assets/webm',
+  'runtime/electron-helper',
+  'assets/fonts',
+  'assets/pic',
+  'assets/config.jsonc',
+  'scripts/ensure-electron.mjs',
+  'cordis.patch.yml',
+];
+writeFileSync(PKG, JSON.stringify({ ...pkg, files: keep }, null, 2) + '\n', 'utf8');
+console.log(`[prepare] ✓ package.json files=[${keep.join(', ')}]`);
+console.log('[prepare] ready to publish: npm publish --tag latest');

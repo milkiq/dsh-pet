@@ -8,10 +8,10 @@
  *
  * 样式对齐官方设置页：max-width 720px、全走 --dsw-alias-* 语义 token（主题跟随）。
  */
-import { assertClientConfig, stripJsonc } from './config';
+import { assertClientConfig, PET_DISPLAYS, stripJsonc } from '../shared/config';
 import { NOTIFY_ICONS, reloadNotifications, requestNotificationPermission } from './notify';
-import type { Corner, Pet } from './types';
-import type { ChangeEvent, CSSProperties, Dispatch, FunctionComponent, SetStateAction, useEffect } from 'react';
+import type { Corner, Pet, PetDisplay } from '../shared/types';
+import type { ChangeEvent, CSSProperties, Dispatch, FunctionComponent, SetStateAction } from 'react';
 import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
@@ -46,6 +46,12 @@ export const zh = {
   sizeHint: '高度自动 = 宽度 × 9/16。',
   balanceEnabled: '余额功能',
   balanceEnabledHint: '启用后该宠物触发余额动画并显示余额气泡。',
+  displayLabel: '显示位置',
+  displayHint: 'web=仅浏览器 / desktop=仅桌面 / both=两者都显示 / none=都不显示',
+  'display.web': '仅浏览器',
+  'display.desktop': '仅桌面',
+  'display.both': '两者都显示',
+  'display.none': '都不显示',
   cornerLabel: '位置',
   'corner.top-left': '左上角',
   'corner.top-right': '右上角',
@@ -92,6 +98,12 @@ export const en = {
   sizeHint: 'Height is automatic = width × 9/16.',
   balanceEnabled: 'Balance',
   balanceEnabledHint: 'When enabled, this pet plays balance animations and shows the balance bubble.',
+  displayLabel: 'Display',
+  displayHint: 'web = browser only / desktop = desktop only / both = both / none = neither',
+  'display.web': 'Browser only',
+  'display.desktop': 'Desktop only',
+  'display.both': 'Both',
+  'display.none': 'Neither',
   cornerLabel: 'Position',
   'corner.top-left': 'Top-left',
   'corner.top-right': 'Top-right',
@@ -147,7 +159,8 @@ export const en = {
 export function makePetConfigSection(rt: {
   h: typeof jsx;
   useState: <T>(init: T) => [T, Dispatch<SetStateAction<T>>];
-  useEffect: typeof useEffect;
+  // 用 React 命名空间类型而非 typeof：type-only import 的 hook 无法进入声明导出（TS4078）
+  useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
   t: (key: string) => string;
 }): FunctionComponent<{ close?: () => void }> {
   const { h, useState, useEffect, t } = rt;
@@ -352,7 +365,7 @@ export function makePetConfigSection(rt: {
       const id = nextId(pets);
       setPets((list) => [
         ...list,
-        { id, size: tpl.size, balanceEnabled: tpl.balanceEnabled, position: { ...tpl.position } },
+        { id, size: tpl.size, balanceEnabled: tpl.balanceEnabled, display: tpl.display, position: { ...tpl.position } },
       ]);
       setSelId(id);
     };
@@ -552,6 +565,36 @@ export function makePetConfigSection(rt: {
                     h('span', {
                       style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
                       children: t('balanceEnabledHint'),
+                    }),
+                  ],
+                }),
+                h('label', {
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    fontSize: '12px',
+                    color: 'var(--dsw-alias-label-secondary)',
+                  },
+                  children: [
+                    t('displayLabel'),
+                    h('select', {
+                      value: cur.display,
+                      disabled: busy,
+                      onChange: (e: ChangeEvent<HTMLSelectElement>) =>
+                        updateSel({ display: e.target.value as PetDisplay }),
+                      style: { width: '160px', ...inputStyle },
+                      children: PET_DISPLAYS.map((d) =>
+                        h('option', {
+                          key: d,
+                          value: d,
+                          children: t('display.' + d),
+                        }),
+                      ),
+                    }),
+                    h('span', {
+                      style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
+                      children: t('displayHint'),
                     }),
                   ],
                 }),

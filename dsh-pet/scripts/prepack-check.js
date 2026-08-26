@@ -39,19 +39,19 @@ const required = [
   'lib/types/index.d.ts', // 宿主类型声明
   'lib/types/client/index.d.ts', // 客户端类型声明
   'cordis.patch.yml', // bundle patch（挂载声明）
+  'runtime/electron-helper/main.js', // 桌面模式 Electron 主进程
+  'runtime/electron-helper/preload.js', // 桌面模式 preload 桥
+  'runtime/electron-helper/renderer.js', // 桌面模式渲染端（宠物本体）
+  'runtime/electron-helper/shared-core.js', // 桌面模式共享纯逻辑（src/shared 构建产物，window.PetShared）
+  'runtime/electron-helper/index.html', // 桌面模式页面壳
 ];
 for (const f of required) {
   existsSync(join(ROOT, f)) ? ok(`exists ${f}`) : fail(`missing ${f}`);
 }
 
-// ---- 2. 至少有待机动画（播放必需）——webm（默认 latest 发布）或 mov（@hevc 发布）任一存在即可 ----
+// ---- 2. 至少有待机动画（播放必需）——单一 webm 格式（浏览器 + 桌面模式共用）----
 const idleWebm = join(ROOT, 'assets', 'webm', '待机呼吸休闲.webm');
-const idleMov = join(ROOT, 'assets', 'mov', '待机呼吸休闲.mov');
-existsSync(idleWebm)
-  ? ok('idle webm present')
-  : existsSync(idleMov)
-    ? ok('idle mov present (@hevc build)')
-    : fail('missing 待机呼吸休闲.webm/mov thumb');
+existsSync(idleWebm) ? ok('idle webm present') : fail('missing 待机呼吸休闲.webm thumb');
 
 // ---- 3. 原始母版不得进 npm 包 ----
 // assets/ 根下若有 .webm 就是原始母版（播放素材在 assets/webm|mov 子目录）

@@ -1,18 +1,21 @@
-// 系统通知引擎（client 半侧）：订阅 DSH 事件流（mux + host），按「聚焦不弹」规则
+// 系统通知引擎（client 半侧，浏览器专属）：订阅 DSH 事件流（mux + host），按「聚焦不弹」规则
 // 发出系统级 toast（Web Notification API，Windows 为右下角原生通知）。
+// 这是**独立于宠物**的能力（监测 DSH 事件 → 弹 toast），天然只随 DSH 网页端走；
+// 桌面模式是宠物本体，不做宠物无关的功能——「两端一致」只约束宠物行为。
+// 行为（帧 → 文案）来自 src/shared/notify.ts（单一来源）。
 // 单一总开关：读 config.jsonc 的 notificationsEnabled；纯副作用模块，无 react 依赖，
 // 由 app.ts 装配层启动。
 //
-// 触发清单（与 DSH 事件契约一一对应）：
-//   - 对话完成：mux session/event → turn/end，reason.kind === 'completed'
-//   - 生成失败：同上，reason.kind === 'error'（含无回合位置的 host/agent-error）
-//   - 输出截断：同上，reason.kind === 'max-tokens'
-//   - 权限申请：mux approval/requested
-//   - 用户选择：mux question/requested
+// 触发清单（与 DSH 事件契约一一对应，见 shared/notify.ts）：
+//   - 对话完成 / 生成失败 / 输出截断（turn/end reason.kind）
+//   - 生成失败（host/agent-error，无回合位置）
+//   - 权限申请（approval/requested）
+//   - 用户选择（question/requested）
 // 过滤：aborted / interrupted 不弹；重连重放的 approval/question 帧按 rpcId 去重。
 
-import { applyUserOverrides, assertClientConfig, stripJsonc } from './config';
-import type { UserOverrides } from './config';
+import { applyUserOverrides, assertClientConfig, stripJsonc } from '../shared/config';
+import type { UserOverrides } from '../shared/config';
+import { frameToToast, truncate, NOTIFY_ICONS as ICON_NAMES, type NotifyFrame } from '../shared/notify';
 
 // ---------- 聚焦门：仅在页面不可见/失焦时弹 ----------
 
@@ -46,11 +49,18 @@ function isPageActive(): boolean {
 
 // ---------- 发送 ----------
 
-const MAX_BODY = 80;
+/** 图标 URL（pic 路由由宿主提供：assets/pic → /dsh-pet-7340/pic/<file>） */
+const PIC = (name: string): string => '/dsh-pet-7340/pic/' + name + '.png';
 
-function truncate(text: string): string {
-  return text.length > MAX_BODY ? text.slice(0, MAX_BODY) + '…' : text;
-}
+/** 图标 URL 表（设置页「获取权限」成功确认的测试通知也用）——文件名单一来源在 shared */
+export const NOTIFY_ICONS = {
+  done: PIC(ICON_NAMES.done),
+  error: PIC(ICON_NAMES.error),
+  truncated: PIC(ICON_NAMES.truncated),
+  approval: PIC(ICON_NAMES.approval),
+  question: PIC(ICON_NAMES.question),
+  test: PIC(ICON_NAMES.test),
+} as const;
 
 /** 当前生效的总开关（运行中可被 reloadNotifications 更新——设置页保存后即时生效，无需刷新） */
 let notifyEnabled = true;
@@ -75,6 +85,13 @@ function toast(title: string, body?: string, icon?: string): void {
   } catch {
     /* 个别环境（e.g. 部分桌面壳）可能在构造时抛错：忽略，不打断业务 */
   }
+}
+
+/** 帧 → toast 并发出（映射来自 shared；未知帧静默跳过） */
+function toastFrame(frame: NotifyFrame): void {
+  const t = frameToToast(frame);
+  if (!t) return;
+  toast(t.title, t.body, PIC(t.icon));
 }
 
 /** 申请浏览器通知权限的结果：ok=true 已授予；ok=false 带失败原因（供设置页红字展示） */
@@ -127,26 +144,12 @@ export async function reloadNotifications(): Promise<void> {
   notifyEnabled = await readNotificationsEnabled();
 }
 
-type Frame = { type: string; [k: string]: unknown };
-type SessionEventLike = { type: string; data?: Record<string, unknown> };
-
-/** 通知图标 URL（pic 路由由宿主提供：assets/pic → /dsh-pet-7340/pic/<file>） */
-const ICON = {
-  done: '/dsh-pet-7340/pic/notify-done.png',
-  error: '/dsh-pet-7340/pic/notify-error.png',
-  truncated: '/dsh-pet-7340/pic/notify-truncated.png',
-  approval: '/dsh-pet-7340/pic/notify-approval.png',
-  question: '/dsh-pet-7340/pic/notify-question.png',
-  test: '/dsh-pet-7340/pic/notify-test.png',
-} as const;
-
-/** 图标 URL 表（设置页「获取权限」成功确认的测试通知也用） */
-export const NOTIFY_ICONS = ICON;
-
 // ---------- mux 流：会话事件 + 权限 + 问题 ----------
 
 async function runMuxLoop(
-  api: { events: { mux: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: Frame }> } },
+  api: {
+    events: { mux: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: NotifyFrame }> };
+  },
   signal: AbortSignal,
 ): Promise<void> {
   // 重连时服务器会重放仍 pending 的 approval/question 帧（rpcId 保持不变）——按 rpcId 去重
@@ -154,56 +157,27 @@ async function runMuxLoop(
   for await (const env of api.events.mux({}, signal)) {
     const frame = env?.payload;
     if (!frame) continue;
-    switch (frame.type) {
-      case 'session/event': {
-        const ev = (frame.event ?? {}) as SessionEventLike;
-        if (ev.type !== 'turn/end') break;
-        const reason = (ev.data?.reason ?? {}) as { kind?: string; error?: { message?: string } };
-        const kind = reason.kind;
-        if (kind === 'completed') toast('对话完成', undefined, ICON.done);
-        else if (kind === 'error') toast('生成失败', reason.error?.message ?? '', ICON.error);
-        else if (kind === 'max-tokens') toast('输出被截断', '已达到输出 token 上限', ICON.truncated);
-        // aborted（用户/父代理取消）、interrupted（崩溃恢复）：不弹
-        break;
-      }
-      case 'approval/requested': {
-        if (seen.has(env.rpcId)) break;
-        seen.add(env.rpcId);
-        const toolName = String(frame.toolName ?? '');
-        const reason = typeof frame.reason === 'string' && frame.reason ? (frame.reason as string) : '';
-        toast(
-          '正在申请权限',
-          (toolName ? '工具「' + toolName + '」' : '') + (reason ? '：' + reason : ''),
-          ICON.approval,
-        );
-        break;
-      }
-      case 'question/requested': {
-        if (seen.has(env.rpcId)) break;
-        seen.add(env.rpcId);
-        const q =
-          (Array.isArray(frame.questions) && (frame.questions as Array<{ question?: string }>)[0]?.question) || '';
-        toast('模型在等你回答', q, ICON.question);
-        break;
-      }
-      default:
-        break;
+    // session/event + approval/requested + question/requested：映射与过滤都在 shared
+    if (frame.type === 'approval/requested' || frame.type === 'question/requested') {
+      if (seen.has(env.rpcId)) continue;
+      seen.add(env.rpcId);
     }
+    toastFrame(frame);
   }
 }
 
 // ---------- host 流：无回合位置的失败 ----------
 
 async function runHostLoop(
-  api: { events: { host: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: Frame }> } },
+  api: {
+    events: { host: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: NotifyFrame }> };
+  },
   signal: AbortSignal,
 ): Promise<void> {
   for await (const env of api.events.host({}, signal)) {
     const frame = env?.payload;
     if (!frame) continue;
-    if (frame.type === 'host/agent-error') {
-      toast('生成失败', typeof frame.message === 'string' ? (frame.message as string) : '', ICON.error);
-    }
+    toastFrame(frame);
   }
 }
 
@@ -215,8 +189,8 @@ async function runHostLoop(
 export async function startNotify(
   api: {
     events: {
-      mux: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: Frame }>;
-      host: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: Frame }>;
+      mux: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: NotifyFrame }>;
+      host: (req: unknown, signal: AbortSignal) => AsyncIterable<{ rpcId: unknown; payload: NotifyFrame }>;
     };
   },
   signal: AbortSignal,

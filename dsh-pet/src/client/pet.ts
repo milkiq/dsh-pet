@@ -2,24 +2,33 @@
 // 工厂形态与 settings.ts 一致：client 半侧不能顶层 import react，
 // react 能力由 DSH 运行时注入（rt），组件在工厂内制造。
 // 动作配置在本模块持有：PetMulti 加载后赋值，PetCard 只读（单一事实来源 = config.jsonc）。
-import { pick, rollKind, pickCategoryAction } from './pickers';
-import { planMove } from './motion';
-import { assertClientConfig, EMPTY_CONF, applyUserOverrides, stripJsonc, type UserOverrides } from './config';
-import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from './balance';
+// 纯逻辑（选择/移动几何/余额/配置校验）来自 src/shared —— 与桌面模式共用同一份源码。
+import { pick, rollKind, pickCategoryAction } from '../shared/pickers';
+import { planMove } from '../shared/motion';
+import {
+  assertClientConfig,
+  EMPTY_CONF,
+  applyUserOverrides,
+  isWebVisible,
+  stripJsonc,
+  type UserOverrides,
+} from '../shared/config';
+import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from '../shared/balance';
 import { makeBalanceBubble } from './bubble';
-import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH } from './constants';
+import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH } from '../shared/constants';
 import { petBridge } from './settings';
-import type { ClientConfig, Corner, Pet } from './types';
+import type { ClientConfig, Corner, Pet } from '../shared/types';
 import type * as ReactNS from 'react';
-import type { Dispatch, ReactNode, SetStateAction, useEffect, useRef } from 'react';
+import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
 /** 运行时配置（PetMulti 加载后赋值；PetCard 只读） */
 let config: ClientConfig = EMPTY_CONF;
 
 /** 播放动画扩展名：发布期注入，不做运行时判断。
- *  源码里是占位符 __PET_EXT__；publish 的 prepack 链用 scripts/inject-ext.js
- *  在 bundle 之后把构建产物替换为 .webm / .mov，本地开发同样用它切换。 */
+ *  源码里是占位符 __PET_EXT__；prepack 链的 scripts/prepare.js 在 bundle 之后
+ *  把构建产物替换为 .webm（唯一发布/播放格式）。Safari/HEVC(.mov) 兼容属 fork
+ *  定制（仓库保留流水线 scripts/encode_hevc_alpha.sh），插件本体不发布、不支持 .mov。 */
 const THUMB_EXT: string = '__PET_EXT__';
 
 /** 余额气泡展示时长（ms）：定时自动消失，与动画生命周期解耦 */
@@ -58,8 +67,9 @@ function injectCss(): void {
 export function makePetUI(rt: {
   h: typeof jsx;
   useState: <T>(init: T) => [T, Dispatch<SetStateAction<T>>];
-  useEffect: typeof useEffect;
-  useRef: typeof useRef;
+  // 用 React 命名空间类型而非 typeof：type-only import 的 hook 无法进入声明导出（TS4078）
+  useEffect: (effect: ReactNS.EffectCallback, deps?: ReactNS.DependencyList) => void;
+  useRef: <T>(initial: T) => ReactNS.MutableRefObject<T>;
 }): () => ReactNode {
   const { h, useState, useEffect, useRef } = rt;
   injectCss();
@@ -570,8 +580,10 @@ export function makePetUI(rt: {
       };
     }, []);
 
+    // 浏览器 overlay 只渲染 display ∈ {web, both} 的宠物；desktop / none 不参与网页显示
+    const visiblePets = pets.filter((p) => isWebVisible(p.display));
     // 是否存在启用余额功能的宠物：全禁用时跳过余额轮询（不拉取 /dsh-pet-7340/balance，避免无意义的周期请求）
-    const anyBalanceEnabled = pets.some((p) => p.balanceEnabled);
+    const anyBalanceEnabled = visiblePets.some((p) => p.balanceEnabled);
 
     // 余额轮询：配置就绪（ready）且至少一只宠物启用余额后启动拉取一次，之后按 eventsRefreshSec.balance（秒）周期刷新；
     // 成功递增 balanceTick 触发事件动画；失败/不支持均不触发动画（错误显式 console.error，绝不显示伪造余额）
@@ -642,7 +654,7 @@ export function makePetUI(rt: {
       };
     }, [ready, anyBalanceEnabled]);
 
-    return ready ? pets.map((p) => h(PetCard, { key: p.id, cfg: p, balance, balanceTick })) : null;
+    return ready ? visiblePets.map((p) => h(PetCard, { key: p.id, cfg: p, balance, balanceTick })) : null;
   }
 
   return PetMulti;

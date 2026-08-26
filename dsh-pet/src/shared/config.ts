@@ -1,6 +1,10 @@
-// 配置层：剥注释、校验 config.jsonc。运行时（ANIM）直接使用与 jsonc 同构的 ClientConfig，
+// 配置层：剥注释、校验 config.jsonc（src/shared 单一来源，浏览器与桌面共用）。
+// 运行时（浏览器 PetCard / 桌面 sprite）直接使用与 jsonc 同构的 ClientConfig，
 // 不做字段转换；缺失/非法一律视为配置错误（throw，由加载层显式报错）。
-import type { Animations, ClientConfig, Corner, Pet, Weights } from './types';
+//
+// 注意：宿主半侧（src/host）因 DSH 单文件加载约束必须自包含，这里不 import 本模块——
+// 宿主侧只保留 stripJsonc 与 display 白名单两个极小拷贝（见 src/host/index.ts）。
+import type { Animations, ClientConfig, Corner, Pet, PetDisplay, Weights } from './types';
 
 /** 剥除 JSONC 注释（行注释 // 与块注释），得到纯 JSON 字符串 */
 export const stripJsonc = (src: string): string =>
@@ -14,7 +18,16 @@ export const CORNERS: Corner[] = ['top-left', 'top-right', 'bottom-left', 'botto
 /** corner 合法性检查用的 string 集合（Corner[] 的 includes 要求 Corner 参数，无法接收未知 string） */
 const CORNER_SET: ReadonlySet<string> = new Set(CORNERS);
 
-/** ClientConfig 类型占位（data-less；PetMulti 加载后由 assertClientConfig 赋真实值） */
+/** 显示位置白名单（四个值，必填） */
+export const PET_DISPLAYS: PetDisplay[] = ['web', 'desktop', 'both', 'none'];
+const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
+
+/** 该宠物是否参与浏览器 overlay 渲染 */
+export const isWebVisible = (display: PetDisplay): boolean => display === 'web' || display === 'both';
+/** 该宠物是否参与桌面模式（Electron 透明窗）渲染 */
+export const isDesktopVisible = (display: PetDisplay): boolean => display === 'desktop' || display === 'both';
+
+/** ClientConfig 类型占位（data-less；加载后由 assertClientConfig 赋真实值） */
 export const EMPTY_CONF: ClientConfig = {
   notificationsEnabled: true,
   pets: [],
@@ -51,13 +64,22 @@ export function assertClientConfig(raw: unknown): ClientConfig {
     const balanceEnabled = p?.balanceEnabled;
     if (typeof balanceEnabled !== 'boolean')
       throw new Error('dsh-pet: pet「' + id + '」缺少 balanceEnabled（需为布尔值 true/false）');
+    const display = p?.display;
+    if (typeof display !== 'string' || !PET_DISPLAY_SET.has(display))
+      throw new Error('dsh-pet: pet「' + id + '」缺少 display（需为 web/desktop/both/none 之一）');
     const corner = p?.position?.corner;
     if (typeof corner !== 'string' || !CORNER_SET.has(corner)) throw new Error('dsh-pet: pet「' + id + '」corner 非法');
     const marginX = Number(p?.position?.marginX);
     const marginY = Number(p?.position?.marginY);
     if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) throw new Error('dsh-pet: pet「' + id + '」边距非法');
     seen.add(id);
-    pets.push({ id, size, balanceEnabled, position: { corner: corner as Corner, marginX, marginY } });
+    pets.push({
+      id,
+      size,
+      balanceEnabled,
+      display: display as PetDisplay,
+      position: { corner: corner as Corner, marginX, marginY },
+    });
   }
 
   // ---- animations ----

@@ -1,4 +1,5 @@
 // 画布 / 几何常量：与 640×360 播放变体强耦合，属于运行时几何，不作为配置。
+// 浏览器 overlay 与桌面模式共用同一组（src/shared = shared-core 单一来源）。
 /** thumb 画布高度 */
 export const CANVAS_H = 360;
 /** thumb 画布上「脚底」的 y 坐标（人物站在 y=330 线上） */
