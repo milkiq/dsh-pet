@@ -384,6 +384,7 @@ export function makePetUI(rt: {
         maxDist: mp.maxDist * distScale,
         margin: mp.margin,
         halfW,
+        sideAllow,
       });
       if (!plan) return false;
       pendingMoveRef.current = {
@@ -481,12 +482,17 @@ export function makePetUI(rt: {
 
     // ---- 渲染 ----
     const bottomPad = (size * (9 / 16) * (CANVAS_H - FEET_Y)) / CANVAS_H;
+    // 左右透明边余量（视频盒内宠物身体居中）：夹取按"身体"贴边——宠物能走到屏幕边缘，身体永不越界
+    const sideAllow = (HIT_BOX.x0 / 640) * size;
     const stageStyle = dragging ? { transform: 'none' } : { transform: 'translateY(' + bottomPad + 'px)' };
     const rootStyle = customPos
       ? (() => {
           const rx = customPos.rx;
           const ry = customPos.ry;
-          const left = Math.min(Math.max(rx * window.innerWidth - halfW, 0), window.innerWidth - size);
+          const left = Math.min(
+            Math.max(rx * window.innerWidth - halfW, -sideAllow),
+            window.innerWidth - size + sideAllow,
+          );
           const top = Math.min(Math.max(ry * window.innerHeight - halfH, 0), window.innerHeight - (size * 9) / 16);
           return { left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' };
         })()

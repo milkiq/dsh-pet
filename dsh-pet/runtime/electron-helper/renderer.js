@@ -1,18 +1,20 @@
 /**
- * dsh-pet desktop helper renderer —— 透明桌面窗口里的宠物本体（每只宠物一个 DOM sprite）。
+ * dsh-pet desktop helper renderer —— 每只桌面宠物一个独立局部小窗口里的宠物本体。
  *
- * 与浏览器 overlay 严格对齐（宠物行为/文案完全一致，桌面的宠物内容不可能多于或少于浏览器）：
+ * 与浏览器 overlay 严格对齐（宠物行为/文案完全一致）：
  *   - 纯逻辑（常量/选择器/移动几何/余额折算/配置校验）来自 shared-core.js
  *     （= src/shared 的构建产物，window.PetShared）——与浏览器 bundle 共用同一份源码；
  *   - 配置唯一来源 config.jsonc + 用户覆盖层（/config 合并），加载失败**大声报错**并显示红色错误条
  *     （每 5s 自动重试），绝无静默兜底池；
- *   - 动画素材经宿主 /dsh-pet-7340/thumb/<name>.webm（用户 main-animation 目录由宿主端优先）；
- *   - 功能集 = 浏览器 overlay：多开同屏（display∈{desktop,both} 全部渲染）、角落+边距定位、
- *     待机/转向/漫游/分类动作随机链、点击、拖拽（会话内位置保持，重启回角落）、
- *     余额事件动画 + 富余额气泡（每只宠物按 balanceEnabled 门控）。
- *   - 系统通知不是宠物行为（它独立于宠物：浏览器半侧 notify.ts 负责），桌面端不重复实现。
+ *   - 动画素材经宿主 /dsh-pet-7340/thumb/<name>.webm；
+ *   - 几何模型：窗口 = 宠物包围盒 + 四周外扩余量（WINDOW_MARGIN_RATIO，为气泡/弹窗预留空间）。
+ *     sprite 固定在窗口内 (margin.l, margin.t) 处，宠物的"移动"由本页把目标屏幕位置
+ *     逐帧上报（petBridge.setBounds）→ 主进程按 sprite 位置 + 外扩余量移动窗口；
+ *     视口 = 主屏工作区（workAreaW/H 由主进程注入），漫游/角落/位置换算都用它。
+ *     外扩区透明且点击穿透（只有身体命中区可交互），不挡下层应用。
+ *   - 系统通知不是宠物行为（浏览器半侧 notify.ts 负责），桌面端不重复实现。
  *
- * 端点全部由 configUrl 推导：balance / balance/trigger / thumb / font。
+ * 端点全部由 configUrl 推导：balance / balance/trigger / thumb / font / pic。
  * 入口仅加载：shared-core.js（经典 script）→ renderer.js（本文件）。
  */
 'use strict';
@@ -23,6 +25,12 @@ const params = new URLSearchParams(location.search);
 const CONFIG = {
   configUrl: params.get('configUrl') || 'http://127.0.0.1:3080/dsh-pet-7340/config.jsonc',
   scale: Number(params.get('scale') || '1'),
+  petIndex: Number(params.get('petIndex') || '0'),
+};
+// 视口 = 主屏工作区（窗口只是宠物的一块局部画布）：漫游边界/角落定位/位置比例换算用它
+const VIEW = {
+  w: Number(params.get('workAreaW') || (window.screen && window.screen.availWidth) || 1920),
+  h: Number(params.get('workAreaH') || (window.screen && window.screen.availHeight) || 1080),
 };
 const ORIGIN = new URL(CONFIG.configUrl).origin;
 const withSuffix = (suffix) => CONFIG.configUrl.replace(/config\.jsonc$/, suffix);
@@ -30,20 +38,19 @@ const BALANCE_URL = withSuffix('balance');
 const TRIGGER_URL = withSuffix('balance/trigger');
 const ASSET_BASE = withSuffix('thumb/');
 const BUBBLE_DURATION_MS = 10 * 1000; // 余额气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
+// 窗口四周外扩 = 该比例 × 宠物尺寸：为气泡 / 未来可能的弹窗预留显示空间；
+// 外扩区透明且点击穿透（只有身体命中区可交互）。单点可调——按实际观感改这里。
+const WINDOW_MARGIN_RATIO = 0.5;
 
 // ---------- 全局状态 ----------
 const rootEl = document.getElementById('root');
 const errorEl = document.getElementById('pet-error');
 let config = null; // ClientConfig（通过 shared 的 assertClientConfig 校验）
-let sprites = []; // PetSprite[]
-let balance = null; // BalanceState（容器共享，一次拉取驱动所有启用余额的 sprite）
+let sprites = []; // PetSprite[]（本窗口只装一只宠物）
+let balance = null; // BalanceState（本窗口单宠共用）
 let balanceTick = 0;
 let bootTimer = null;
 let loopsStarted = false;
-
-function clamp(value, min, max) {
-  return Math.min(Math.max(value, min), max);
-}
 
 // ---------- 调试钩子（冒烟自检/排障用；真实运行也可排查错误/配置/气泡） ----------
 window.__dshPetDebug = {
@@ -93,27 +100,6 @@ async function loadConfig() {
   return S.assertClientConfig(S.applyUserOverrides(base, user));
 }
 
-// ---------- 点击穿透（窗口级）：鼠标落在任一宠物/气泡外时穿透到下层应用 ----------
-let lastMouse = { x: -1, y: -1 };
-document.addEventListener('mousemove', (e) => {
-  lastMouse = { x: e.clientX, y: e.clientY };
-  updateClickThrough();
-});
-function updateClickThrough() {
-  const anyInside = sprites.some((s) => {
-    const r = s.hit.getBoundingClientRect();
-    if (lastMouse.x >= r.left && lastMouse.x <= r.right && lastMouse.y >= r.top && lastMouse.y <= r.bottom) return true;
-    if (s.bubble.classList.contains('is-on')) {
-      const b = s.bubble.getBoundingClientRect();
-      return lastMouse.x >= b.left && lastMouse.x <= b.right && lastMouse.y >= b.top && lastMouse.y <= b.bottom;
-    }
-    return false;
-  });
-  const anyDragging = sprites.some((s) => s.dragState.active || s.dragState.dragging);
-  const ignore = !anyInside && !anyDragging;
-  if (window.petBridge) window.petBridge.setIgnoreMouse(ignore);
-}
-
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
 class PetSprite {
   constructor(pet, cfg) {
@@ -124,6 +110,29 @@ class PetSprite {
     this.halfW = this.size / 2;
     this.halfH = this.height / 2;
     this.bottomPad = (this.size * (9 / 16) * (S.CANVAS_H - S.FEET_Y)) / S.CANVAS_H;
+    // 窗口高 = 舞台高 + 脚底垫高（stage 被 translateY(bottomPad) 下移的余量，防底部被窗口裁剪）
+    this.winH = this.height + this.bottomPad;
+    // 窗口内【可交互区域】= 身体命中区（像素，窗口坐标）。浏览器 overlay 只有 .dsh-pet-hit 是
+    // pointer-events:auto（root/stage/气泡全 none）——桌面严格对齐：命中区外含透明像素一律穿透到下层应用。
+    // HIT_BOX 是 640×360 舞台坐标：x 按窗口宽缩放；y 除舞台高外还要加 bottomPad（舞台被下移）。
+    this.hitRect = {
+      x: (S.HIT_BOX.x0 / 640) * this.size,
+      y: this.bottomPad + (S.HIT_BOX.y0 / 360) * this.height,
+      w: ((S.HIT_BOX.x1 - S.HIT_BOX.x0) / 640) * this.size,
+      h: ((S.HIT_BOX.y1 - S.HIT_BOX.y0) / 360) * this.height,
+    };
+    window.__dshPetDebug.hitRect = this.hitRect;
+    // 左右透明边余量（视频盒内宠物身体居中）：让边界按"身体"贴边——宠物能走到屏幕边缘，
+    // 但身体永不越界（漫游/拖拽都不会弄丢宠物）。与浏览器 overlay 的 sideAllow 同一套语义。
+    this.sideAllow = (S.HIT_BOX.x0 / 640) * this.size;
+    window.__dshPetDebug.sideAllow = this.sideAllow;
+    // 窗口四周外扩（= WINDOW_MARGIN_RATIO×宠物尺寸）：sprite 钉在 (margin.l, margin.t)，
+    // 窗口 = sprite + 四边余量——气泡/未来弹窗显示在余量里；余量透明且点击穿透
+    const m = this.size * WINDOW_MARGIN_RATIO;
+    this.margin = { t: m, r: m, b: m, l: m };
+    window.__dshPetDebug.winMargin = this.margin;
+    // 宠物包围盒左上角在【工作区】坐标系里的位置（本窗口的位置 = 宠物的位置）
+    this.pos = { x: 0, y: 0 };
 
     // 播放状态（与浏览器同构）
     this.front = 0; // 0 = A, 1 = B
@@ -133,8 +142,9 @@ class PetSprite {
     this.once = true;
     this.facing = 'left';
     // 交互/移动
-    this.dragState = { active: false, dragging: false, sx: 0, sy: 0, offX: 0, offY: 0 };
+    this.dragState = { active: false, dragging: false, sx: 0, sy: 0, petX: 0, petY: 0 };
     this.justDragged = false;
+    this._interactive = null; // 当前可交互状态（null=未定；只在变化时发 IPC，避免逐帧刷屏）
     this.moveRef = null;
     this.moveToken = 0;
     this.pendingMove = null;
@@ -145,9 +155,11 @@ class PetSprite {
     this.balanceView = null;
     this.prevTick = 0;
 
-    // DOM
+    // DOM：sprite 钉在窗口内 (margin.l, margin.t)；宠物"位置"= sprite 位置，窗口随余量外扩
     this.el = document.createElement('div');
     this.el.className = 'pet-sprite';
+    this.el.style.left = this.margin.l + 'px';
+    this.el.style.top = this.margin.t + 'px';
     this.el.style.setProperty('--pet-size', this.size + 'px');
     const stage = document.createElement('div');
     stage.className = 'pet-stage';
@@ -190,6 +202,11 @@ class PetSprite {
     window.addEventListener('pointerup', (e) => this.onPointerUp(e), { signal: ac.signal });
     window.addEventListener('pointercancel', (e) => this.onPointerUp(e), { signal: ac.signal });
     this.hit.addEventListener('lostpointercapture', (e) => this.onPointerUp(e), { signal: ac.signal });
+    // 点击穿透：窗口默认整窗穿透（main 设 setIgnoreMouseEvents(true, {forward:true})），
+    // 光标进/出身体命中区时翻转可交互；穿透期间 mousemove 由 main 转发进来（forward:true），
+    // mouseleave 保证光标离开窗口立即恢复穿透（透明像素不挡下层应用，与浏览器一致）。
+    window.addEventListener('mousemove', (e) => this.onMouseMove(e), { signal: ac.signal });
+    window.addEventListener('mouseleave', () => this.setInteractive(false), { signal: ac.signal });
   }
 
   dispose() {
@@ -199,15 +216,31 @@ class PetSprite {
     this.el.remove();
   }
 
-  // 角落/边距 → 位置；拖拽后按会话内位置（比例）并夹取在屏内
+  // 目标包围盒左上角（工作区坐标）→ 移动窗口：窗口 = sprite + 四周外扩余量
+  // （sprite 钉在窗口 (margin.l, margin.t)，气泡/弹窗显示在余量里）
+  sendBounds(px, py) {
+    this.pos = { x: Math.round(px), y: Math.round(py) };
+    window.__dshPetDebug.dragPos = { x: this.pos.x, y: this.pos.y };
+    if (window.petBridge) {
+      window.petBridge.setBounds(
+        this.pos.x - this.margin.l,
+        this.pos.y - this.margin.t,
+        this.size + this.margin.l + this.margin.r,
+        this.winH + this.margin.t + this.margin.b,
+      );
+    }
+  }
+
+  // 角落/边距 → 窗口位置；拖拽后按会话内位置（比例）还原——**松手无任何边界夹取**，
+  // 宠物停在哪就算哪（与浏览器一致：可以完全拖出工作区/屏幕；漫游仍有 planMove 边界检查兜底）
   position() {
-    const W = window.innerWidth;
-    const H = window.innerHeight;
+    const W = VIEW.w;
+    const H = VIEW.h;
     let x;
     let y;
     if (this.customPos) {
-      x = clamp(this.customPos.rx * W - this.halfW, 0, W - this.size);
-      y = clamp(this.customPos.ry * H - this.halfH, 0, H - this.height);
+      x = this.customPos.rx * W - this.halfW;
+      y = this.customPos.ry * H - this.halfH;
     } else {
       const anchor = S.anchorPixel({
         corner: this.pet.position.corner,
@@ -220,19 +253,16 @@ class PetSprite {
       x = anchor.x;
       y = anchor.y;
     }
-    this.el.style.left = x + 'px';
-    this.el.style.top = y + 'px';
-    this.el.style.right = 'auto';
-    this.el.style.bottom = 'auto';
+    this.sendBounds(x, y);
   }
 
   currentCenterX() {
-    if (this.customPos) return this.customPos.rx * window.innerWidth;
-    return this.el.getBoundingClientRect().left + this.halfW;
+    if (this.customPos) return this.customPos.rx * VIEW.w;
+    return this.pos.x + this.halfW;
   }
   currentCenterY() {
-    if (this.customPos) return this.customPos.ry * window.innerHeight;
-    return this.el.getBoundingClientRect().top + this.halfH;
+    if (this.customPos) return this.customPos.ry * VIEW.h;
+    return this.pos.y + this.halfH;
   }
 
   // 双缓冲切换（与浏览器同一套：前台 opacity 切换 + 降级视频清 handler 并停播，防残留 ended 雪崩）
@@ -337,8 +367,8 @@ class PetSprite {
     const chosen = actions[Math.floor(Math.random() * actions.length)];
     const mp = Object.assign({}, moves.default, chosen.params || {});
     const dir = (this.facing === 'right') !== this.cfg.animations.turn.includes(this.anim) ? 1 : -1;
-    const W = window.innerWidth;
-    const H = window.innerHeight;
+    const W = VIEW.w;
+    const H = VIEW.h;
     const distScale = this.size / S.PET_REF_WIDTH;
     const plan = S.planMove({
       cx: this.currentCenterX(),
@@ -350,6 +380,7 @@ class PetSprite {
       maxDist: mp.maxDist * distScale,
       margin: mp.margin,
       halfW: this.halfW,
+      sideAllow: this.sideAllow,
     });
     if (!plan) return false;
     this.pendingMove = { ...plan, dir, leadSec: mp.leadSec, tailSec: mp.tailSec };
@@ -367,8 +398,8 @@ class PetSprite {
     const duration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : 10.09;
     const travelWindow = Math.max(0.1, duration - leadSec - tailSec);
     const token = ++this.moveToken;
-    const W = window.innerWidth;
-    const H = window.innerHeight;
+    const W = VIEW.w;
+    const H = VIEW.h;
     const step = () => {
       if (this.moveToken !== token) return;
       const t = el.currentTime || 0;
@@ -376,12 +407,8 @@ class PetSprite {
       if (t <= leadSec) ratioX = startRatio;
       else if (t >= duration - tailSec) ratioX = targetRatio;
       else ratioX = startRatio + dir * totalRatio * ((t - leadSec) / travelWindow);
-      const px = ratioX * W;
-      const py = startYRatio * H;
-      this.el.style.left = px - this.halfW + 'px';
-      this.el.style.top = py - this.halfH + 'px';
-      this.el.style.right = 'auto';
-      this.el.style.bottom = 'auto';
+      // 移动的是窗口（宠物包围盒跟随），sprite 在本窗口内不动
+      this.sendBounds(ratioX * W - this.halfW, startYRatio * H - this.halfH);
       if (t < duration - tailSec) {
         this.moveRef = requestAnimationFrame(step);
       } else {
@@ -401,7 +428,7 @@ class PetSprite {
     }
   }
 
-  // ---- 点击 vs 拖拽（与浏览器一致：拖拽阈值、抓取偏移、释放接循环待机、会话内位置保持） ----
+  // ---- 点击 vs 拖拽（与浏览器一致：阈值/抓取偏移/释放回循环待机；移动的是窗口） ----
   onPointerDown(e) {
     this.hit.classList.add('dragging');
     this.stopMove();
@@ -410,11 +437,16 @@ class PetSprite {
     } catch {
       /* 忽略捕获失败 */
     }
-    const rect = this.el.getBoundingClientRect();
-    const offX = e.clientX - (rect.left + rect.width / 2);
-    const offY = e.clientY - (rect.top + rect.height / 2);
-    this.dragState = { active: true, dragging: false, sx: e.clientX, sy: e.clientY, offX, offY };
-    if (window.petBridge) window.petBridge.setIgnoreMouse(false);
+    // 记录【按下时的指针屏幕坐标】与【按下时的宠物窗口位置】——之后全部用 e.screenX/Y
+    // 做增量：指针屏幕坐标与窗口位置无关，不受窗口被逐帧移动影响（window.screenX 会滞后/缓存）。
+    this.dragState = {
+      active: true,
+      dragging: false,
+      sx: e.screenX,
+      sy: e.screenY,
+      petX: this.pos.x,
+      petY: this.pos.y,
+    };
     // 注意：舞台「拍平」（去掉 translateY(bottomPad)）不能在这里做——
     // 纯点击（按下即松开）会让人物瞬移上移再落下。与浏览器一致：只有拖拽超过阈值才拍平。
   }
@@ -422,8 +454,9 @@ class PetSprite {
   onPointerMove(e) {
     const d = this.dragState;
     if (!d.active) return;
-    const dx = e.clientX - d.sx;
-    const dy = e.clientY - d.sy;
+    // 阈值判定用屏幕坐标增量（clientX 会随窗口移动而变化，屏幕坐标稳定）
+    const dx = e.screenX - d.sx;
+    const dy = e.screenY - d.sy;
     if (!d.dragging) {
       if (Math.hypot(dx, dy) < S.DRAG_THRESHOLD) return;
       d.dragging = true;
@@ -433,10 +466,8 @@ class PetSprite {
         this.playOnce(S.pick(this.cfg.animations.drag));
       }
     }
-    this.el.style.left = e.clientX - d.offX - this.halfW + 'px';
-    this.el.style.top = e.clientY - d.offY - this.halfH + 'px';
-    this.el.style.right = 'auto';
-    this.el.style.bottom = 'auto';
+    // 目标位置 = 按下时的宠物位置 + 指针屏幕增量（窗口怎么动都不影响坐标）
+    this.sendBounds(d.petX + dx, d.petY + dy);
   }
 
   onPointerUp(e) {
@@ -445,16 +476,24 @@ class PetSprite {
     d.active = false;
     d.dragging = false;
     this.hit.classList.remove('dragging');
-    // lostpointercapture 的 event 可能没有 clientX（pointercancel 同理）：fallback 到当前 DOM 位置
-    const cx = e && Number.isFinite(e.clientX) ? e.clientX : this.el.getBoundingClientRect().left + this.halfW;
-    const cy = e && Number.isFinite(e.clientY) ? e.clientY : this.el.getBoundingClientRect().top + this.halfH;
+    // lpointercancel 等可能没有 screenX：fallback 到当前宠物窗口位置
+    const sx = e && Number.isFinite(e.screenX) ? e.screenX : d.petX;
+    const sy = e && Number.isFinite(e.screenY) ? e.screenY : d.petY;
+    const nx = d.petX + (sx - d.sx);
+    const ny = d.petY + (sy - d.sy);
     this.stage.style.transform = 'translateY(' + this.bottomPad + 'px)';
     if (wasDragging) {
       this.justDragged = true;
       setTimeout(() => {
         this.justDragged = false;
       }, 100);
-      this.customPos = { rx: (cx - d.offX) / window.innerWidth, ry: (cy - d.offY) / window.innerHeight };
+      // 原始输入留痕（实机排查用：验证指针屏幕坐标与窗口位移是否一致，如 DPI 缩放问题）
+      window.__dshPetDebug.lastDragRaw = { petX: d.petX, petY: d.petY, sxDown: d.sx, syDown: d.sy, xUp: sx, yUp: sy };
+      // customPos 语义 = 宠物**中心**比例（position() 用 rx*W - halfW 还原左上角，与浏览器
+      // 的 (clientX - offX)/W 严格一致；startMoveDrive 结束时存的 targetRatio 也是中心）。
+      // 而 nx/ny 是拖拽结束时窗口的**左上角**——必须加回 halfW/halfH 再存，
+      // 否则松手瞬间窗口会整体向屏幕左上平移 (halfW, halfH)（旧版曾表现为"跳左上角"）。
+      this.customPos = { rx: (nx + this.halfW) / VIEW.w, ry: (ny + this.halfH) / VIEW.h };
       // 释放后接一段循环待机（与浏览器一致），再回随机链
       if (this.cfg.animations.idle.length) {
         const name = S.pick(this.cfg.animations.idle, this.anim);
@@ -463,8 +502,34 @@ class PetSprite {
         this.switchTo(name, false);
       }
       this.position();
-      updateClickThrough();
+      // 释放后的最终窗口位置（position() 换算后，松手无夹取），冒烟断言"释放不位移"用
+      window.__dshPetDebug.lastDragRelease = { x: this.pos.x, y: this.pos.y };
     }
+  }
+
+  // ---- 点击穿透（严格对齐浏览器：只有身体命中区可交互，透明像素穿透到下层应用） ----
+  setInteractive(flag) {
+    const next = !!flag;
+    if (next === this._interactive) return; // 只在状态变化时发 IPC，避免逐帧刷屏
+    this._interactive = next;
+    window.__dshPetDebug.interactive = next;
+    if (window.petBridge) window.petBridge.setInteractive(next);
+  }
+
+  onMouseMove(e) {
+    // 拖拽中窗口逐帧跟随光标、指针相对窗口坐标会有帧级抖动——强制保持可交互，绝不翻转（翻转会断拖拽）
+    if (this.dragState.active) {
+      this.setInteractive(true);
+      return;
+    }
+    const r = this.hitRect;
+    // forwarded 事件坐标以窗口为原点（与页坐标一致）；转换到 sprite 坐标需扣减窗口余量；
+    // 异常时退回屏幕坐标 - 窗口位置推导（hitRect/pos 均为 sprite 坐标）
+    const wx = Number.isFinite(e.clientX) ? e.clientX : e.screenX - (this.pos.x - this.margin.l);
+    const wy = Number.isFinite(e.clientY) ? e.clientY : e.screenY - (this.pos.y - this.margin.t);
+    const px = wx - this.margin.l;
+    const py = wy - this.margin.t;
+    this.setInteractive(px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h);
   }
 
   onClick() {
@@ -615,12 +680,18 @@ async function boot() {
       scheduleReboot();
       return;
     }
+    // 本窗口只承载一只宠物：petIndex 由主进程按 DSH_PET_PETS 顺序注入
+    const pet = pets[CONFIG.petIndex];
+    if (!pet) {
+      showError('petIndex=' + CONFIG.petIndex + ' 超出桌面宠物列表（共 ' + pets.length + ' 只），本窗口不创建宠物');
+      scheduleReboot();
+      return;
+    }
     for (const s of sprites) s.dispose();
-    sprites = pets.map((p) => new PetSprite(p, cfg));
+    sprites = [new PetSprite(pet, cfg)];
     window.__dshPetDebug.configOk = true;
     window.__dshPetDebug.spriteCount = sprites.length;
     for (const s of sprites) s.playIdle();
-    updateClickThrough();
     startLoops();
   } catch (e) {
     showError('配置加载失败：' + (e && e.message ? String(e.message) : String(e)));
@@ -646,6 +717,8 @@ function injectAssets() {
   document.head.appendChild(style);
 }
 
+// 工作区尺寸由主进程注入并在进程生命周期内不变；窗口本身跟随宠物移动，
+// 这里仍兜底处理窗口内容区尺寸异常的情况（按当前窗口位置重新规整）。
 window.addEventListener('resize', () => {
   for (const s of sprites) s.position();
 });

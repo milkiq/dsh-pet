@@ -219,10 +219,21 @@ export function apply(ctx: any): void {
   };
   refreshDesktop();
 
+  /** 桌面可见宠物列表（[{id,size}]）：透传 Helper 决定创建几个局部窗口（每宠物一个）。 */
+  const desktopPetList = (): Array<{ id: string; size: number }> => {
+    try {
+      return readEffectivePets()
+        .filter((p) => isDesktopVisible(p.display))
+        .map((p) => ({ id: String(p.id), size: Number(p.size) }));
+    } catch {
+      return [];
+    }
+  };
+
   let helper: HelperProcess | undefined;
   let startRetryTimer: NodeJS.Timeout | undefined;
 
-  /** 拉起桌面 Helper（Electron 透明窗口，渲染全部 display 含 desktop 的宠物）；
+  /** 拉起桌面 Helper（Electron 为每只桌面宠物开一个局部小窗口）；
    *  Electron 缺失时仅告警，不影响 DSH 与浏览器 overlay。 */
   const startHelper = (): void => {
     if (helper) return;
@@ -246,6 +257,8 @@ export function apply(ctx: any): void {
         env: {
           DSH_PET_CONFIG_URL: configUrl,
           DSH_PET_SCALE: '1',
+          // 每只桌面宠物一个局部小窗口：透传宠物列表（[{id,size}]）
+          DSH_PET_PETS: JSON.stringify(desktopPetList()),
         },
       },
       ctx.logger ?? console,

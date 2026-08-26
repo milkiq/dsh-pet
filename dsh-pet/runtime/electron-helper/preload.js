@@ -1,9 +1,14 @@
-// preload 桥：只暴露点击穿透开关（宠物交互/漫游/余额/通知全部在 renderer 内自洽，
-// 不再需要 close/hide/openWebUi/beep/refreshBalance 等桌面独有桥方法——与浏览器严格对齐后已删除）。
+// preload 桥：只暴露窗口控制原语——
+//   - setBounds：宠物窗口逐帧跟随（renderer 上报包围盒的屏幕坐标，主进程 setContentBounds）
+//   - setInteractive：点击穿透翻转——窗口默认整窗穿透（透明像素不挡下层应用），
+//     renderer 在光标进/出宠物身体命中区时上报，主进程 setIgnoreMouseEvents 翻转。
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('petBridge', {
-  setIgnoreMouse(ignore) {
-    ipcRenderer.send('pet:set-ignore-mouse', { ignore: ignore === true });
+  setBounds(x, y, width, height) {
+    ipcRenderer.send('pet:set-bounds', { x, y, width, height });
+  },
+  setInteractive(interactive) {
+    ipcRenderer.send('pet:set-interactive', !!interactive);
   },
 });

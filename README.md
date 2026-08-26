@@ -69,7 +69,7 @@ dsh plugin --profile web add file:D:/path/to/dsh-pet
 
 ## 🪟 桌面模式（可选，脱离浏览器）
 
-插件内建**双模式**：安装后默认会拉起一个**独立透明置顶窗口**（Electron，全屏画布 + 点击穿透），宠物脱离 DSH 网页界面运行。与浏览器 overlay **严格同行为**——同一份纯逻辑源码（`dsh-pet/src/shared/`），两端的功能/动画/文案/配置完全对齐，不会出现"一个有另一个没有"：
+插件内建**双模式**：安装后默认会拉起**独立透明置顶窗口**——为每只桌面宠物各开一个**局部小窗口**（尺寸 = 宠物包围盒 + 四周外扩余量，为气泡/弹窗预留空间，跟随宠物移动；**永不铺满屏幕**：全屏透明分层窗会触发 Windows DWM 视频合成黑屏）。与浏览器 overlay **严格同行为**——同一份纯逻辑源码（`dsh-pet/src/shared/`），两端的功能/动画/文案/配置完全对齐，不会出现"一个有另一个没有"：
 
 - **依赖**：首次启动自动探测 Electron（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到时自动下载到 `~/.dsh/electron/`（可 `cd dsh-pet && npm run ensure:electron` 手动触发）；缺失时仅日志告警，不影响浏览器形态
 - **开关 = 每只宠物的必填字段 `display`**（四个值）：`web` = 仅浏览器 / `desktop` = 仅桌面 / `both` = 两者 / `none` = 都不显示；桌面模式渲染 display 含 desktop 的**全部**宠物（多开同屏，与浏览器一致）。在 DSH 设置页「桌宠配置」编辑，保存即时生效；缺失即配置错误，代码不做兜底
@@ -209,6 +209,7 @@ npm publish --tag latest
 > 💡 **两条途径只是编辑入口不同，最终都是同一份用户配置**——配置能力远不止设置页那几个选项：设置页只能改「大小/位置/多开」，但**手动编写配置文件可以任意自由配置**（动画池、播放权重、事件动画、刷新周期……），只要**格式与包内默认配置 `config.jsonc` 一致**即可，用户配置会**整体覆盖**对应字段的默认值。
 
 ### 方式一：设置页（推荐）
+
 DSH 设置 → 「桌宠配置」：
 
 - **大小**：宽度 px（高度自动 = 宽度 × 9/16）
@@ -218,6 +219,7 @@ DSH 设置 → 「桌宠配置」：
 - 点「保存」**即时生效**（无需刷新）；「恢复默认」回到 config.jsonc 默认
 
 ### 方式二：config.jsonc（单一来源）
+
 插件包内 `dsh-pet/assets/config.jsonc` 的 `pets` 数组定义**默认宠物**：
 
 ```jsonc
@@ -234,13 +236,13 @@ DSH 设置 → 「桌宠配置」：
 
 用户层配置文件位于 `$DSH_HOME/dsh-pet/main-config.json`。**它和包内默认配置是同一套格式**——想改什么直接照着 `assets/config.jsonc` 的结构写即可，写错的字段/缺失的字段回落默认，无需（也无法）写完整份：
 
-| 字段 | 作用 | 格式与默认一致即可 |
-|---|---|---|
-| `pets` | 宠物列表（大小/位置/多开/余额开关） | 数组，每项同 `pets[]` 结构 |
-| `animations` | **动画池**：idle / turn / drag / clicks / moves / categories / events（余额等事件动画） | 同 `animations` 结构 |
-| `animationWeights` | 动画链播放权重（idle / turn / move） | 同 `animationWeights` 结构 |
-| `eventsRefreshSec` | 事件刷新周期（秒） | 同 `eventsRefreshSec` 结构 |
-| `notificationsEnabled` | 系统通知总开关（布尔） | 同 `notificationsEnabled` |
+| 字段                   | 作用                                                                                    | 格式与默认一致即可         |
+| ---------------------- | --------------------------------------------------------------------------------------- | -------------------------- |
+| `pets`                 | 宠物列表（大小/位置/多开/余额开关）                                                     | 数组，每项同 `pets[]` 结构 |
+| `animations`           | **动画池**：idle / turn / drag / clicks / moves / categories / events（余额等事件动画） | 同 `animations` 结构       |
+| `animationWeights`     | 动画链播放权重（idle / turn / move）                                                    | 同 `animationWeights` 结构 |
+| `eventsRefreshSec`     | 事件刷新周期（秒）                                                                      | 同 `eventsRefreshSec` 结构 |
+| `notificationsEnabled` | 系统通知总开关（布尔）                                                                  | 同 `notificationsEnabled`  |
 
 > 覆盖语义：用户层给出即**整体替换**该字段（如写了 `animations` 就用你的整份动画池，替代默认），没写的字段回落包内默认。校验在插件加载时执行——格式错误会在 DSH 控制台显式报错，不会静默运行残缺配置。
 
@@ -409,6 +411,7 @@ DSH 设置 → 「桌宠配置」：
 </p>
 
 > 注：动画为透明背景；GIF 预览中透明部分显示为页面底色，实际 webm 播放为透明。
+
 ## 文档
 
 - [设计与实现](DESIGN.md) —— 架构、动画链模型、素材链
