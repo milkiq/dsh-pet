@@ -33,6 +33,10 @@ import {
   throwBounds,
   throwStep,
   trimTrail,
+  SQ_DURATION_MS,
+  SQ_SQUASH,
+  squashScale,
+  landingSquash,
   type DragSample,
   type ThrowState,
 } from '../shared/physics';
@@ -147,6 +151,10 @@ export function makePetUI(rt: {
     const dragFollowTokenRef = useRef(0);
     const throwRef = useRef<number | null>(null);
     const throwTokenRef = useRef(0);
+    // Q 弹挤压（点击回应 / 抛掷落地）：rAF + 待压标记（等新动画真正成为前台再压，压的是新首帧）
+    const squashRef = useRef<number | null>(null);
+    const squashTokenRef = useRef(0);
+    const pendingSquashRef = useRef(false);
     const animRef = useRef(anim);
     animRef.current = anim;
 
@@ -182,6 +190,11 @@ export function makePetUI(rt: {
         pendingRef.current = null;
         el.style.transform = facingRef.current === 'right' ? 'scaleX(-1)' : '';
         el.play().catch(() => {});
+        // 点击 Q 弹：等新动画就位后才压（压的是新点击动画的首帧，与桌面一致）
+        if (pendingSquashRef.current) {
+          pendingSquashRef.current = false;
+          startSquash(el);
+        }
         if (pendingMoveRef.current) startMoveDrive(el);
       };
       el.addEventListener('loadeddata', onReady);
@@ -198,6 +211,7 @@ export function makePetUI(rt: {
         stopMove();
         stopDragFollow();
         stopThrow();
+        stopSquash();
       },
       [],
     );
@@ -513,12 +527,14 @@ export function makePetUI(rt: {
       const token = ++throwTokenRef.current;
       let state: ThrowState = { x: px, y: py, vx, vy };
       let last = performance.now();
+      let prevGrounded = false; // 落地 Q 弹：只在空中→地面转换帧触发一次
       const rootEl = rootRef.current;
       const step = () => {
         if (throwTokenRef.current !== token) return;
         const now = performance.now();
         const dt = (now - last) / 1000;
         last = now;
+        const fallingVy = state.vy; // 本帧积分前的竖直速度（正=下落）：即落地冲击速度
         const res = throwStep(state, dt, bounds);
         state = { x: res.x, y: res.y, vx: res.vx, vy: res.vy };
         if (rootEl) {
@@ -532,6 +548,13 @@ export function makePetUI(rt: {
           rx: (res.x + halfW) / window.innerWidth,
           ry: (res.y + halfH) / window.innerHeight,
         };
+        // 落地 Q 弹：只在空中→地面转换帧触发一次，力度随冲击速度（轻落 0.8 ~ 重砸 0.55）
+        const grounded = res.y >= bounds.maxY - 1;
+        if (res.bounced && grounded && !prevGrounded) {
+          const frontEl = frontRef.current === 0 ? videoARef.current : videoBRef.current;
+          if (frontEl) startSquash(frontEl, landingSquash(fallingVy));
+        }
+        prevGrounded = grounded;
         if (res.atRest) {
           throwRef.current = null;
           setCustomPos(customPosRef.current);
@@ -540,6 +563,39 @@ export function makePetUI(rt: {
         throwRef.current = requestAnimationFrame(step);
       };
       throwRef.current = requestAnimationFrame(step);
+    };
+    /** Q 弹挤压：前台视频垂直压扁（贴地锚定，transform-origin:bottom）再回弹；
+     *  与桌面同构，曲线在 shared（squashScale）。depth = 下压幅度（点击固定 0.55；
+     *  落地按冲击速度 landingSquash 动态取）。reduce-motion 时跳过。 */
+    const startSquash = (el: HTMLVideoElement, depth: number = SQ_SQUASH) => {
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      const token = ++squashTokenRef.current;
+      if (squashRef.current !== null) cancelAnimationFrame(squashRef.current);
+      const origin = el.style.transformOrigin;
+      el.style.transformOrigin = 'bottom';
+      const t0 = performance.now();
+      const step = () => {
+        if (squashTokenRef.current !== token) return;
+        const u = Math.min((performance.now() - t0) / SQ_DURATION_MS, 1);
+        const scale = squashScale(u, depth);
+        el.style.transform = (facingRef.current === 'right' ? 'scaleX(-1) ' : '') + 'scaleY(' + scale + ')';
+        if (u < 1) {
+          squashRef.current = requestAnimationFrame(step);
+        } else {
+          squashRef.current = null;
+          el.style.transformOrigin = origin;
+          // 恢复纯镜像（若期间 switchTo 重置过 transform，也以镜像为准）
+          el.style.transform = facingRef.current === 'right' ? 'scaleX(-1)' : '';
+        }
+      };
+      squashRef.current = requestAnimationFrame(step);
+    };
+    const stopSquash = () => {
+      squashTokenRef.current++;
+      if (squashRef.current !== null) {
+        cancelAnimationFrame(squashRef.current);
+        squashRef.current = null;
+      }
     };
 
     const facingRef = useRef<'left' | 'right'>(facing);
@@ -635,6 +691,7 @@ export function makePetUI(rt: {
       if (!config.animations.clicks.length) return;
       const name = pick(config.animations.clicks);
       console.log('[dsh-pet] ' + new Date().toTimeString().slice(0, 8) + ' pet=' + cfg.id + ' -> [CLICK] ' + name);
+      pendingSquashRef.current = true; // 等新点击动画切到前台后 Q 弹（压新首帧）
       setAnim(name);
     };
 

@@ -157,6 +157,10 @@ class PetSprite {
     this.dragFollowToken = 0;
     this.throwRef = null; // 抛掷 rAF handle
     this.throwToken = 0;
+    // Q 弹挤压（点击回应 / 抛掷落地）：rAF + 待压标记（等新动画成为前台再压，压新首帧）
+    this.squashRef = null;
+    this.squashToken = 0;
+    this.pendingSquash = false;
     this._interactive = null; // 当前可交互状态（null=未定；只在变化时发 IPC，避免逐帧刷屏）
     this.moveRef = null;
     this.moveToken = 0;
@@ -236,6 +240,7 @@ class PetSprite {
     this.closeMenu();
     this.stopThrow();
     this.stopDragFollow();
+    this.stopSquash();
     this.stopMove();
     this.el.remove();
   }
@@ -320,6 +325,11 @@ class PetSprite {
       this.pending = null;
       el.style.transform = this.facing === 'right' ? 'scaleX(-1)' : '';
       el.play().catch(() => {});
+      // 点击 Q 弹：等新动画就位后才压（压的是新点击动画的首帧，与浏览器一致）
+      if (this.pendingSquash) {
+        this.pendingSquash = false;
+        this.startSquash(el);
+      }
       if (this.pendingMove) this.startMoveDrive(el);
     };
     el.addEventListener('loadeddata', onReady);
@@ -508,14 +518,23 @@ class PetSprite {
     const token = ++this.throwToken;
     let state = { x: px, y: py, vx, vy };
     let last = performance.now();
+    let prevGrounded = false; // 落地 Q 弹：只在空中→地面转换帧触发一次
     const step = () => {
       if (this.throwToken !== token) return;
       const now = performance.now();
       const dt = (now - last) / 1000;
       last = now;
+      const fallingVy = state.vy; // 本帧积分前的竖直速度（正=下落）：即落地冲击速度
       const res = S.throwStep(state, dt, bounds);
       state = { x: res.x, y: res.y, vx: res.vx, vy: res.vy };
       this.sendBounds(res.x, res.y);
+      // 落地 Q 弹：只在空中→地面转换帧触发一次，力度随冲击速度（轻落 0.8 ~ 重砸 0.55）
+      const grounded = res.y >= bounds.maxY - 1;
+      if (res.bounced && grounded && !prevGrounded) {
+        const frontEl = this.front === 0 ? this.videoA : this.videoB;
+        this.startSquash(frontEl, S.landingSquash(fallingVy));
+      }
+      prevGrounded = grounded;
       if (res.atRest) {
         this.throwRef = null;
         this.customPos = { rx: (this.pos.x + this.halfW) / VIEW.w, ry: (this.pos.y + this.halfH) / VIEW.h };
@@ -525,6 +544,41 @@ class PetSprite {
       this.throwRef = requestAnimationFrame(step);
     };
     this.throwRef = requestAnimationFrame(step);
+  }
+
+  /** Q 弹挤压：前台视频垂直压扁（贴地锚定，transform-origin:bottom）再回弹；
+   *  与浏览器同构，曲线在 shared（S.squashScale）。depth = 下压幅度（点击固定 0.55；
+   *  落地按冲击速度 S.landingSquash 动态取）。reduce-motion 时跳过。 */
+  startSquash(el, depth = S.SQ_SQUASH) {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const token = ++this.squashToken;
+    if (this.squashRef !== null) cancelAnimationFrame(this.squashRef);
+    const origin = el.style.transformOrigin;
+    el.style.transformOrigin = 'bottom';
+    const t0 = performance.now();
+    const step = () => {
+      if (this.squashToken !== token) return;
+      const u = Math.min((performance.now() - t0) / S.SQ_DURATION_MS, 1);
+      const scale = S.squashScale(u, depth);
+      el.style.transform = (this.facing === 'right' ? 'scaleX(-1) ' : '') + 'scaleY(' + scale + ')';
+      if (u < 1) {
+        this.squashRef = requestAnimationFrame(step);
+      } else {
+        this.squashRef = null;
+        el.style.transformOrigin = origin;
+        // 恢复纯镜像（若期间 switchTo 重置过 transform，也以镜像为准）
+        el.style.transform = this.facing === 'right' ? 'scaleX(-1)' : '';
+      }
+    };
+    this.squashRef = requestAnimationFrame(step);
+  }
+
+  stopSquash() {
+    this.squashToken++;
+    if (this.squashRef !== null) {
+      cancelAnimationFrame(this.squashRef);
+      this.squashRef = null;
+    }
   }
 
   // ---- 点击 vs 拖拽（与浏览器一致：阈值/抓取偏移/释放回循环待机；移动的是窗口） ----
@@ -658,8 +712,10 @@ class PetSprite {
   onClick() {
     const d = this.dragState;
     if (d.active || d.dragging || this.justDragged) return;
+    this.stopThrow(); // 点击飞行中的宠物 = 收手停住（再播点击回应）
     this.stopMove();
     if (!this.cfg.animations.clicks.length) return;
+    this.pendingSquash = true; // 等新点击动画切到前台后 Q 弹（压新首帧，与浏览器一致）
     this.playOnce(S.pick(this.cfg.animations.clicks));
   }
 

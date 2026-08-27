@@ -45,6 +45,45 @@ export const REST_VX = 15;
 /** 单步最大 dt（s）：防后台标签页/卡顿后恢复的巨帧跳变 */
 export const MAX_STEP_DT = 0.05;
 
+// ---- Q 弹挤压（squash & stretch）：点击回应 / 抛掷落地时角色垂直压扁再回弹 ----
+/** 下压幅度：高度压到 55%（3 倍力度：原压深 15% → 现压深 45%，可继续调） */
+export const SQ_SQUASH = 0.55;
+/** 挤压时长（ms） */
+export const SQ_DURATION_MS = 220;
+/** 落地冲击速度基准：低于此 = 轻落（按下限幅度） */
+export const SQ_SOFT_SPEED = 300;
+/** 落地冲击速度上限：达到/超过此 = 重砸（吃满最大下压） */
+export const SQ_HARD_SPEED = 1500;
+/** 落地最大下压幅度（与点击一致）；轻落下限 0.8——重力 1400px/s²、恢复 0.78 下典型落地速度
+ *  400~1500px/s，映射太保守会让常规甩抛的落地 Q 弹回到"不明显"，故底部留底限 */
+export const SQ_MAX_SQUASH = 0.55;
+
+/**
+ * 落地冲击速度 → 下压幅度 scaleY 值（速度越大压得越狠）。
+ * 返回作为 startSquash 的 squash 参数，曲线仍走 squashScale（u 进度不变）。
+ */
+export const landingSquash = (impactSpeed: number): number => {
+  const t = Math.min(Math.max((Math.abs(impactSpeed) - SQ_SOFT_SPEED) / (SQ_HARD_SPEED - SQ_SOFT_SPEED), 0), 1);
+  return Math.min(0.8, 1 - t * (1 - SQ_MAX_SQUASH));
+};
+
+/**
+ * Q 弹挤压曲线：u∈[0,1] 进度 → scaleY 值。
+ * 下压段（0~0.45）ease-in 压缩；回弹段（0.45~1）easeOutBack 带回弹过冲（~4%）。
+ * 两端共用同一曲线，手感严格一致。
+ */
+export const squashScale = (u: number, squash: number = SQ_SQUASH): number => {
+  if (u < 0.45) {
+    const p = u / 0.45;
+    return 1 - (1 - squash) * p * p;
+  }
+  const p = (u - 0.45) / 0.55;
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  const f = 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2);
+  return Math.min(1.12, squash + (1 - squash) * Math.max(f, 0));
+};
+
 /** 一次轨迹采样（t = performance.now() 时间戳 ms；x/y = 指针绝对坐标 px） */
 export interface DragSample {
   t: number;
