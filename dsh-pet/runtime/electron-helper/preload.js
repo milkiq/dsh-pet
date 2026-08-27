@@ -11,4 +11,8 @@ contextBridge.exposeInMainWorld('petBridge', {
   setInteractive(interactive) {
     ipcRenderer.send('pet:set-interactive', !!interactive);
   },
+  // 右键菜单「打开网站」：主进程用系统默认浏览器打开 DSH 网站（等效网页 Ctrl+点击链接）
+  openDshSite(url) {
+    ipcRenderer.send('pet:open-site', { url });
+  },
 });

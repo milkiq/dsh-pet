@@ -16,6 +16,15 @@ import {
 import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from '../shared/balance';
 import { makeBalanceBubble } from './bubble';
 import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH } from '../shared/constants';
+// 统一右键菜单：与桌面共用同一份组件（树 + 渲染 + 样式，src/shared/menu.ts）
+import {
+  buildMenuTree,
+  mountContextMenu,
+  isNoMirrorAnimation,
+  MENU_CSS,
+  type MenuLeaf,
+  type MenuNode,
+} from '../shared/menu';
 import { petBridge } from './settings';
 import type { ClientConfig, Corner, Pet } from '../shared/types';
 import type * as ReactNS from 'react';
@@ -47,6 +56,8 @@ const css = [
   '.dsh-pet-hit{position:absolute;pointer-events:auto;cursor:url("/dsh-pet-7340/pic/cursor-grab.png") 16 16, grab;z-index:1}',
   '.dsh-pet-hit.dragging{cursor:url("/dsh-pet-7340/pic/cursor-grabbing.png") 16 16, grabbing}',
   '@media (prefers-reduced-motion: reduce){.dsh-pet-video{transition:none}}',
+  // 统一右键菜单样式（与桌面注入同一份 MENU_CSS）
+  MENU_CSS,
 ].join('\n');
 const cssTag = 'dsh-pet/style.css';
 function injectCss(): void {
@@ -96,6 +107,8 @@ export function makePetUI(rt: {
     // 余额气泡显隐（事件触发时显示，10s 后定时自动消失）
     const [bubbleOn, setBubbleOn] = useState(false);
     const bubbleTimerRef = useRef<number | null>(null);
+    // 右键菜单（统一自绘组件）：当前挂载的 close() 句柄，卸载/重开前清理
+    const menuRef = useRef<{ close: () => void } | null>(null);
 
     // 配置变化即时跟随（容器重新合并 / 设置页保存后通过 petBridge.sync 触发）
     useEffect(() => {
@@ -165,6 +178,16 @@ export function makePetUI(rt: {
     useEffect(
       () => () => {
         if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
+      },
+      [],
+    );
+    // 卸载时关闭可能开着的右键菜单（挂载的 DOM 一并清理）
+    useEffect(
+      () => () => {
+        if (menuRef.current) {
+          menuRef.current.close();
+          menuRef.current = null;
+        }
       },
       [],
     );
@@ -411,6 +434,8 @@ export function makePetUI(rt: {
 
     // ---- 点击 vs 拖拽 ----
     const handlePointerDown = (e: ReactNS.PointerEvent<HTMLDivElement>) => {
+      // 只认左键：右键进入拖拽判定会与右键菜单打架（右键不拖拽，两端一致）
+      if (e.button !== 0) return;
       e.currentTarget.classList.add('dragging');
       stopMove();
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -480,6 +505,48 @@ export function makePetUI(rt: {
       setAnim(name);
     };
 
+    // ---- 右键菜单（统一自绘组件：树 + 渲染 + 样式与桌面共用 src/shared/menu.ts） ----
+    // 注意：菜单是独立浮层，只在宠物命中区拦截右键（preventDefault + stopPropagation），
+    // 绝不进入/改动 DSH 页面自己的菜单；浏览器端只有「回到初始位置 + 动作」——
+    // 无「打开网站 / 查看余额」（打开网站=就在网页里；查看余额已由对话框 /balance 命令实现）。
+    const handleMenuAction = (leaf: MenuLeaf) => {
+      if (leaf.action === 'home') {
+        // 回到初始位置：停漫游/移动，清掉拖拽/漫游留下的会话位置，回配置角落
+        stopMove();
+        setCustomPos(null);
+        return;
+      }
+      if (!leaf.anim) return;
+      // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与随机链"朝右不选文字"同语义）
+      if (isNoMirrorAnimation(config.animations.categories, leaf.anim) && facingRef.current === 'right') {
+        setFacing('left');
+      }
+      stopMove();
+      setOnce(true);
+      setAnim(leaf.anim);
+    };
+    const handleContextMenu = (e: ReactNS.MouseEvent<HTMLDivElement>) => {
+      // 工具项（回到初始位置，两端共用）+ 动作树（动作→分类→具体动画）
+      const tree: MenuNode[] = [{ label: '回到初始位置', action: 'home' }, ...buildMenuTree(config.animations)];
+      if (!tree.length) return;
+      e.preventDefault();
+      e.stopPropagation(); // 不触碰 DSH 页面任何菜单/右键处理
+      const d = dragRef.current;
+      if (d.active || d.dragging || justDraggedRef.current) return;
+      stopMove(); // 菜单悬停期间宠物不漫游
+      if (menuRef.current) menuRef.current.close();
+      menuRef.current = mountContextMenu({
+        tree,
+        x: e.clientX,
+        y: e.clientY,
+        onAction: handleMenuAction,
+        // 菜单被点外/Esc 关闭（非菜单项路径）：句柄置空，避免残留引用
+        onClose: () => {
+          if (menuRef.current) menuRef.current = null;
+        },
+      });
+    };
+
     // ---- 渲染 ----
     const bottomPad = (size * (9 / 16) * (CANVAS_H - FEET_Y)) / CANVAS_H;
     // 左右透明边余量（视频盒内宠物身体居中）：夹取按"身体"贴边——宠物能走到屏幕边缘，身体永不越界
@@ -511,6 +578,7 @@ export function makePetUI(rt: {
       onPointerMove: handlePointerMove,
       onPointerUp: handlePointerUp,
       onPointerCancel: handlePointerUp,
+      onContextMenu: handleContextMenu,
       title: 'dsh-pet',
     };
     return h('div', {

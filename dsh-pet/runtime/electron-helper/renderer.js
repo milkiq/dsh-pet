@@ -12,6 +12,9 @@
  *     逐帧上报（petBridge.setBounds）→ 主进程按 sprite 位置 + 外扩余量移动窗口；
  *     视口 = 主屏工作区（workAreaW/H 由主进程注入），漫游/角落/位置换算都用它。
  *     外扩区透明且点击穿透（只有身体命中区可交互），不挡下层应用。
+ *   - 右键级联菜单（与浏览器共用同一份组件：树+渲染+样式来自 shared-core 的 menu 模块）：
+ *     右键宠物弹出，桌面端工具根项「打开网站（系统默认浏览器）/ 查看余额 / 回到初始位置」+ 动作点播；
+ *     菜单开启期间整窗保持可交互（悬停菜单不触发穿透翻转），关闭/离开窗口即恢复穿透。
  *   - 系统通知不是宠物行为（浏览器半侧 notify.ts 负责），桌面端不重复实现。
  *
  * 端点全部由 configUrl 推导：balance / balance/trigger / thumb / font / pic。
@@ -59,6 +62,7 @@ window.__dshPetDebug = {
   spriteCount: 0,
   lastBubbleTitle: '',
   lastBalanceOk: null,
+  menuOpen: false,
   bootAt: Date.now(),
 };
 window.addEventListener('error', (event) => {
@@ -149,6 +153,9 @@ class PetSprite {
     this.moveToken = 0;
     this.pendingMove = null;
     this.customPos = null; // 拖拽后的会话内位置（{rx, ry} 比例）；restart 回角落
+    // 右键菜单（统一自绘组件，两端共用同一份：树+渲染均来自 shared-core）
+    this.menuOpen = false; // 菜单开启期间强制整窗可交互（悬停菜单不触发穿透翻转）
+    this.menuClose = null; // 当前菜单的 close()（打开时挂载，关闭后置空）
     // 余额气泡
     this.bubbleOn = false;
     this.bubbleTimer = null;
@@ -199,6 +206,7 @@ class PetSprite {
     this.hit.addEventListener('pointerdown', (e) => this.onPointerDown(e), { signal: ac.signal });
     this.hit.addEventListener('pointermove', (e) => this.onPointerMove(e), { signal: ac.signal });
     this.hit.addEventListener('click', () => this.onClick(), { signal: ac.signal });
+    this.hit.addEventListener('contextmenu', (e) => this.onContextMenu(e), { signal: ac.signal });
     window.addEventListener('pointerup', (e) => this.onPointerUp(e), { signal: ac.signal });
     window.addEventListener('pointercancel', (e) => this.onPointerUp(e), { signal: ac.signal });
     this.hit.addEventListener('lostpointercapture', (e) => this.onPointerUp(e), { signal: ac.signal });
@@ -206,12 +214,17 @@ class PetSprite {
     // 光标进/出身体命中区时翻转可交互；穿透期间 mousemove 由 main 转发进来（forward:true），
     // mouseleave 保证光标离开窗口立即恢复穿透（透明像素不挡下层应用，与浏览器一致）。
     window.addEventListener('mousemove', (e) => this.onMouseMove(e), { signal: ac.signal });
-    window.addEventListener('mouseleave', () => this.setInteractive(false), { signal: ac.signal });
+    window.addEventListener('mouseleave', () => {
+      // 光标离开窗口：若菜单开着立刻收起（菜单是窗口内 DOM，离开即不可达），再恢复穿透
+      this.closeMenu();
+      this.setInteractive(false);
+    }, { signal: ac.signal });
   }
 
   dispose() {
     this.ac.abort();
     if (this.bubbleTimer !== null) window.clearTimeout(this.bubbleTimer);
+    this.closeMenu();
     this.stopMove();
     this.el.remove();
   }
@@ -430,6 +443,8 @@ class PetSprite {
 
   // ---- 点击 vs 拖拽（与浏览器一致：阈值/抓取偏移/释放回循环待机；移动的是窗口） ----
   onPointerDown(e) {
+    // 只认左键：右键进入拖拽判定会与右键菜单打架（右键不拖拽，两端一致）
+    if (e.button !== 0) return;
     this.hit.classList.add('dragging');
     this.stopMove();
     try {
@@ -522,6 +537,11 @@ class PetSprite {
       this.setInteractive(true);
       return;
     }
+    // 右键菜单开启：整窗保持可交互（悬停菜单项不触发穿透翻转）；关闭后恢复命中区判定
+    if (this.menuOpen) {
+      this.setInteractive(true);
+      return;
+    }
     const r = this.hitRect;
     // forwarded 事件坐标以窗口为原点（与页坐标一致）；转换到 sprite 坐标需扣减窗口余量；
     // 异常时退回屏幕坐标 - 窗口位置推导（hitRect/pos 均为 sprite 坐标）
@@ -540,11 +560,104 @@ class PetSprite {
     this.playOnce(S.pick(this.cfg.animations.clicks));
   }
 
+  // ---- 右键菜单（统一自绘组件：树+渲染都来自 shared-core 的同一份 menu 模块） ----
+  onContextMenu(e) {
+    const d = this.dragState;
+    if (d.active || d.dragging || this.justDragged || this.menuOpen) return;
+    e.preventDefault();
+    this.stopMove(); // 菜单悬停期间宠物不漫游
+    // 桌面专属工具根项（打开网站 / 查看余额 / 回到初始位置）+ 共享菜单树（动作→分类→具体动画）
+    const tools = [{ label: '打开网站', action: 'open-site' }];
+    if (this.pet.balanceEnabled) tools.push({ label: '查看余额', action: 'show-balance' });
+    tools.push({ label: '回到初始位置', action: 'home' });
+    const tree = tools.concat(S.buildMenuTree(this.cfg.animations));
+    if (!tree.length) return;
+    this.menuOpen = true;
+    this.setInteractive(true); // 菜单是窗口内 DOM：悬停期间整窗保持可交互，关闭后恢复命中区穿透
+    window.__dshPetDebug.menuOpen = true;
+    const m = S.mountContextMenu({
+      tree,
+      x: e.clientX,
+      y: e.clientY,
+      onAction: (leaf) => this.onMenuAction(leaf),
+      // 菜单被点外/Esc 关闭（非菜单项路径）：同样复位可交互标记，恢复命中区判定
+      onClose: () => {
+        this.menuOpen = false;
+        window.__dshPetDebug.menuOpen = false;
+      },
+    });
+    this.menuClose = m.close;
+  }
+
+  onMenuAction(leaf) {
+    this.closeMenu();
+    if (!leaf || typeof leaf !== 'object') return;
+    if (leaf.action === 'open-site') {
+      if (window.petBridge) window.petBridge.openDshSite(ORIGIN); // 系统默认浏览器打开（等效 Ctrl+点击链接）
+      return;
+    }
+    if (leaf.action === 'show-balance') {
+      this.showBalanceFromMenu(); // 立即拉余额并展示（无需等 1s 触发轮询，展示路径与周期触发一致）
+      return;
+    }
+    if (leaf.action === 'home') {
+      this.goHome(); // 停漫游/移动，清会话位置，回配置角落
+      return;
+    }
+    if (!leaf.anim) return;
+    // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与浏览器随机链"朝右不选文字"同语义）
+    if (S.isNoMirrorAnimation(this.cfg.animations.categories, leaf.anim) && this.facing === 'right') {
+      this.facing = 'left';
+    }
+    this.playOnce(leaf.anim);
+  }
+
+  closeMenu() {
+    if (this.menuClose) {
+      this.menuClose();
+      this.menuClose = null;
+    }
+    this.menuOpen = false;
+    window.__dshPetDebug.menuOpen = false;
+  }
+
+  // 「查看余额」菜单：立即拉取余额并展示（不需要等 1s 触发轮询；展示走 showBalanceNow 同一路径）
+  showBalanceFromMenu() {
+    if (!this.pet.balanceEnabled) return;
+    S.fetchBalanceState(BALANCE_URL)
+      .then((state) => {
+        balance = state;
+        window.__dshPetDebug.lastBalanceOk = state && state.ok === true;
+        if (state.ok) {
+          this.showBalanceNow(state);
+        } else {
+          console.error(
+            '[dsh-pet] 菜单查看余额失败 reason=' + state.reason + (state.message ? ' ' + state.message : ''),
+          );
+        }
+      })
+      .catch((e) => {
+        console.error('[dsh-pet] 菜单查看余额异常', e);
+      });
+  }
+
+  // 「回到初始位置」菜单：停掉漫游/移动，清掉拖拽/漫游留下的会话位置，回到配置角落
+  goHome() {
+    this.stopMove();
+    this.customPos = null;
+    this.position();
+  }
+
   // ---- 余额事件（每只宠物按 balanceEnabled 门控；档位与气泡内容来自 shared） ----
   onBalanceTick(state, tick) {
     if (!this.pet.balanceEnabled) return; // 未启用余额功能 -> 该宠物对余额事件完全免疫（与浏览器一致）
     if (tick === 0 || tick === this.prevTick) return;
     this.prevTick = tick;
+    this.showBalanceNow(state);
+  }
+
+  // 余额展示（档位动画 + 气泡）：周期轮询与菜单点播共用同一展示路径，视觉/行为严格一致
+  showBalanceNow(state) {
     if (!state || !state.ok) return;
     const p = S.balancePercent(state);
     if (p === undefined) return; // 当前数据源没有百分比语义：不触发档位动画
@@ -715,6 +828,10 @@ function injectAssets() {
     ORIGIN +
     '/dsh-pet-7340/pic/cursor-grabbing.png") 16 16, grabbing}';
   document.head.appendChild(style);
+  // 统一右键菜单样式（与浏览器注入同一份 MENU_CSS）
+  const menuStyle = document.createElement('style');
+  menuStyle.textContent = S.MENU_CSS;
+  document.head.appendChild(menuStyle);
 }
 
 // 工作区尺寸由主进程注入并在进程生命周期内不变；窗口本身跟随宠物移动，
