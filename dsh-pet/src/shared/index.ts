@@ -12,3 +12,4 @@ export * from './balance';
 export * from './config';
 export * from './notify';
 export * from './menu'; // 统一右键菜单（本目录唯一的 DOM 例外：树=纯函数，渲染=两端共用同一份）
+export * from './physics'; // 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹）

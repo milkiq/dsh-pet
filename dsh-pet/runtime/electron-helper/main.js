@@ -205,10 +205,11 @@ app.whenReady().then(() => {
               out.afterDrag = stage.style.transform;
               return out;
             })(),
-            releaseKeptPosition: (function () {
-              // 独立不变量：把宠物先拖到工作区内的固定安全点（600,300），
-              // 松手后窗口位置必须原地不动。拖拽中窗口可短暂越界（释放时按工作区夹取），
-              // 所以断言先把宠物拖回安全点，排除夹取干扰，只测"释放瞬间是否位移"。
+            releaseKeptPosition: await (async function () {
+              // 独立不变量：把宠物先拖到工作区内的固定安全点（600,300），松手后窗口位置必须原地不动。
+              // 拖拽抛掷物理（弹簧跟手+甩抛）下：指针长距跳跃后弹簧需要 ~0.3s 收敛，
+              // 松手前停留超过 RELEASE_STALE_MS(150ms) 判为「温柔放下」（估速 null，不抛掷）——
+              // 所以先等弹簧到位、再停留才松手，只测"释放瞬间是否位移"。
               var d = window.__dshPetDebug;
               var hit = document.querySelector('.pet-hit');
               if (!d || !d.dragPos || !hit) return null;
@@ -216,15 +217,23 @@ app.whenReady().then(() => {
               var T = { x: 600, y: 300 }; // 目标窗口左上角（1708×1020 工作区内，远离四边）
               var upX = 1000 + (T.x - P.x);
               var upY = 600 + (T.y - P.y);
+              var sleep = function (ms) {
+                return new Promise(function (r) {
+                  setTimeout(r, ms);
+                });
+              };
               hit.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 1000, clientY: 600, screenX: 1000, screenY: 600, pointerId: 93 }));
               hit.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: upX, clientY: upY, screenX: upX, screenY: upY, pointerId: 93 }));
+              await sleep(400); // 弹簧跟随收敛
               var during = { x: d.dragPos.x, y: d.dragPos.y };
+              await sleep(200); // 轨迹过期 → 估速 null → 温柔放下（不抛掷）
               window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: upX, clientY: upY, screenX: upX, screenY: upY, pointerId: 93 }));
+              await sleep(80); // 释放处理完成
               var released = d.lastDragRelease ? { x: d.lastDragRelease.x, y: d.lastDragRelease.y } : null;
               return {
                 during: during,
                 released: released,
-                kept: !!(released && during.x === released.x && during.y === released.y),
+                kept: !!(released && Math.abs(released.x - during.x) <= 1 && Math.abs(released.y - during.y) <= 1),
               };
             })(),
             interactiveFlip: (function () {

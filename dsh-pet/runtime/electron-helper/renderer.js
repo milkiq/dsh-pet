@@ -148,6 +148,15 @@ class PetSprite {
     // 交互/移动
     this.dragState = { active: false, dragging: false, sx: 0, sy: 0, petX: 0, petY: 0 };
     this.justDragged = false;
+    // 拖拽抛掷物理（与浏览器 pet.ts 同构；纯计算在 shared-core S.*）：
+    // 拖拽中弹簧跟随目标（包围盒左上角，工作区 px），松手按指针轨迹估速 → 抛掷（重力+边缘反弹）
+    this.dragTrail = []; // 指针轨迹采样（screenX/Y + performance.now()，初速估算用）
+    this.dragTarget = null;
+    this.dragVel = { vx: 0, vy: 0 };
+    this.dragFollow = null; // 弹簧跟随 rAF handle
+    this.dragFollowToken = 0;
+    this.throwRef = null; // 抛掷 rAF handle
+    this.throwToken = 0;
     this._interactive = null; // 当前可交互状态（null=未定；只在变化时发 IPC，避免逐帧刷屏）
     this.moveRef = null;
     this.moveToken = 0;
@@ -225,6 +234,8 @@ class PetSprite {
     this.ac.abort();
     if (this.bubbleTimer !== null) window.clearTimeout(this.bubbleTimer);
     this.closeMenu();
+    this.stopThrow();
+    this.stopDragFollow();
     this.stopMove();
     this.el.remove();
   }
@@ -373,7 +384,7 @@ class PetSprite {
 
   // ---- 漫游（rAF 驱动，动画首尾各 leadSec/tailSec 秒原地不动；几何在 shared/planMove） ----
   tryMove() {
-    if (this.moveRef !== null || this.pendingMove) return true;
+    if (this.moveRef !== null || this.pendingMove || this.throwRef !== null) return true;
     const moves = this.cfg.animations.moves;
     const actions = moves.actions;
     if (!actions.length) return false;
@@ -441,10 +452,89 @@ class PetSprite {
     }
   }
 
+  // ---- 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹；与浏览器 pet.ts 同构）----
+  stopDragFollow() {
+    this.dragFollowToken++;
+    if (this.dragFollow !== null) {
+      cancelAnimationFrame(this.dragFollow);
+      this.dragFollow = null;
+    }
+    this.dragTarget = null;
+    this.dragVel = { vx: 0, vy: 0 };
+  }
+
+  /** rAF 弹簧跟随：窗口朝拖拽目标过阻尼追赶（不再硬贴指针），抹平高频抖动 */
+  startDragFollow() {
+    if (this.dragFollow !== null) return;
+    const token = ++this.dragFollowToken;
+    let last = performance.now();
+    const step = () => {
+      if (this.dragFollowToken !== token) return;
+      const target = this.dragTarget;
+      if (!target) {
+        this.dragFollow = null;
+        return;
+      }
+      const now = performance.now();
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      last = now;
+      const vel = this.dragVel;
+      let x = this.pos.x;
+      let y = this.pos.y;
+      vel.vx = S.springStep(vel.vx, x, target.x, dt);
+      vel.vy = S.springStep(vel.vy, y, target.y, dt);
+      x += vel.vx * dt;
+      y += vel.vy * dt;
+      this.sendBounds(x, y); // 移动的是窗口（this.pos 实时更新）；sprite 在本窗口内不动
+      this.dragFollow = requestAnimationFrame(step);
+    };
+    this.dragFollow = requestAnimationFrame(step);
+  }
+
+  /** 停止抛掷（空中被抓/点菜单/回家时立即定格在当前落点） */
+  stopThrow() {
+    this.throwToken++;
+    if (this.throwRef !== null) {
+      cancelAnimationFrame(this.throwRef);
+      this.throwRef = null;
+    }
+  }
+
+  /** 抛掷驱动：重力 + 边缘反弹 + 落地摩擦，落定后写入 customPos */
+  startThrow(px, py, vx, vy) {
+    this.stopDragFollow();
+    this.stopMove();
+    const bounds = S.throwBounds({ W: VIEW.w, H: VIEW.h, size: this.size, sideAllow: this.sideAllow });
+    const token = ++this.throwToken;
+    let state = { x: px, y: py, vx, vy };
+    let last = performance.now();
+    const step = () => {
+      if (this.throwToken !== token) return;
+      const now = performance.now();
+      const dt = (now - last) / 1000;
+      last = now;
+      const res = S.throwStep(state, dt, bounds);
+      state = { x: res.x, y: res.y, vx: res.vx, vy: res.vy };
+      this.sendBounds(res.x, res.y);
+      if (res.atRest) {
+        this.throwRef = null;
+        this.customPos = { rx: (this.pos.x + this.halfW) / VIEW.w, ry: (this.pos.y + this.halfH) / VIEW.h };
+        window.__dshPetDebug.lastDragRelease = { x: this.pos.x, y: this.pos.y };
+        return;
+      }
+      this.throwRef = requestAnimationFrame(step);
+    };
+    this.throwRef = requestAnimationFrame(step);
+  }
+
   // ---- 点击 vs 拖拽（与浏览器一致：阈值/抓取偏移/释放回循环待机；移动的是窗口） ----
   onPointerDown(e) {
     // 只认左键：右键进入拖拽判定会与右键菜单打架（右键不拖拽，两端一致）
     if (e.button !== 0) return;
+    this.stopThrow(); // 空中抓取：从当前落点开始新拖拽（this.pos 实时）
+    this.stopDragFollow();
+    this.stopMove();
+    this.dragTrail = [];
     this.hit.classList.add('dragging');
     this.stopMove();
     try {
@@ -481,8 +571,14 @@ class PetSprite {
         this.playOnce(S.pick(this.cfg.animations.drag));
       }
     }
-    // 目标位置 = 按下时的宠物位置 + 指针屏幕增量（窗口怎么动都不影响坐标）
-    this.sendBounds(d.petX + dx, d.petY + dy);
+    // 记录指针轨迹（screenX/Y 采样：与视口坐标只差常数偏移，速度一致；初速估算用）
+    const now = performance.now();
+    this.dragTrail.push({ t: now, x: e.screenX, y: e.screenY });
+    this.dragTrail = S.trimTrail(this.dragTrail, now);
+    // 弹簧目标 = 按下时的宠物位置 + 指针屏幕增量（窗口怎么动都不影响坐标）——不再硬贴指针，
+    // 由 rAF 弹簧跟随逐帧追赶（抹平高频抖动，与浏览器同构）
+    this.dragTarget = { x: d.petX + dx, y: d.petY + dy };
+    this.startDragFollow();
   }
 
   onPointerUp(e) {
@@ -491,24 +587,17 @@ class PetSprite {
     d.active = false;
     d.dragging = false;
     this.hit.classList.remove('dragging');
-    // lpointercancel 等可能没有 screenX：fallback 到当前宠物窗口位置
-    const sx = e && Number.isFinite(e.screenX) ? e.screenX : d.petX;
-    const sy = e && Number.isFinite(e.screenY) ? e.screenY : d.petY;
-    const nx = d.petX + (sx - d.sx);
-    const ny = d.petY + (sy - d.sy);
+    this.stopDragFollow(); // 弹簧跟随立即停（位置定格在实时 this.pos）
     this.stage.style.transform = 'translateY(' + this.bottomPad + 'px)';
     if (wasDragging) {
       this.justDragged = true;
       setTimeout(() => {
         this.justDragged = false;
       }, 100);
-      // 原始输入留痕（实机排查用：验证指针屏幕坐标与窗口位移是否一致，如 DPI 缩放问题）
-      window.__dshPetDebug.lastDragRaw = { petX: d.petX, petY: d.petY, sxDown: d.sx, syDown: d.sy, xUp: sx, yUp: sy };
-      // customPos 语义 = 宠物**中心**比例（position() 用 rx*W - halfW 还原左上角，与浏览器
-      // 的 (clientX - offX)/W 严格一致；startMoveDrive 结束时存的 targetRatio 也是中心）。
-      // 而 nx/ny 是拖拽结束时窗口的**左上角**——必须加回 halfW/halfH 再存，
-      // 否则松手瞬间窗口会整体向屏幕左上平移 (halfW, halfH)（旧版曾表现为"跳左上角"）。
-      this.customPos = { rx: (nx + this.halfW) / VIEW.w, ry: (ny + this.halfH) / VIEW.h };
+      if (e && Number.isFinite(e.screenX)) {
+        // 原始输入留痕（实机排查用：验证指针屏幕坐标与窗口位移是否一致，如 DPI 缩放问题）
+        window.__dshPetDebug.lastDragRaw = { petX: d.petX, petY: d.petY, sxDown: d.sx, syDown: d.sy, xUp: e.screenX, yUp: e.screenY };
+      }
       // 释放后接一段循环待机（与浏览器一致），再回随机链
       if (this.cfg.animations.idle.length) {
         const name = S.pick(this.cfg.animations.idle, this.anim);
@@ -516,9 +605,23 @@ class PetSprite {
         this.once = false;
         this.switchTo(name, false);
       }
-      this.position();
-      // 释放后的最终窗口位置（position() 换算后，松手无夹取），冒烟断言"释放不位移"用
-      window.__dshPetDebug.lastDragRelease = { x: this.pos.x, y: this.pos.y };
+      // 释放位置 = 弹簧跟随后的实际包围盒左上角（this.pos 实时；不是指针目标——
+      // 跟手滞后时落点跟随宠物实际位置，与浏览器 boxPx 同语义）
+      const px = this.pos.x;
+      const py = this.pos.y;
+      // 初速估算：够快就抛掷（重力+边缘反弹+落地摩擦），否则原地放下
+      const vel = S.estimateReleaseVelocity(this.dragTrail, performance.now());
+      this.dragTrail = [];
+      if (vel) {
+        this.startThrow(px, py, vel.vx, vel.vy);
+      } else {
+        // customPos 语义 = 宠物**中心**比例（position() 用 rx*W - halfW 还原左上角；
+        // startThrow 落定也按同一公式存），松手无边界夹取
+        this.customPos = { rx: (px + this.halfW) / VIEW.w, ry: (py + this.halfH) / VIEW.h };
+        this.position();
+        // 释放后的最终窗口位置（position() 换算后，松手无夹取），冒烟断言"释放不位移"用
+        window.__dshPetDebug.lastDragRelease = { x: this.pos.x, y: this.pos.y };
+      }
     }
   }
 
@@ -565,6 +668,7 @@ class PetSprite {
     const d = this.dragState;
     if (d.active || d.dragging || this.justDragged || this.menuOpen) return;
     e.preventDefault();
+    this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
     // 桌面专属工具根项（打开网站 / 查看余额 / 回到初始位置）+ 共享菜单树（动作→分类→具体动画）
     const tools = [{ label: '打开网站', action: 'open-site' }];
@@ -643,6 +747,7 @@ class PetSprite {
 
   // 「回到初始位置」菜单：停掉漫游/移动，清掉拖拽/漫游留下的会话位置，回到配置角落
   goHome() {
+    this.stopThrow();
     this.stopMove();
     this.customPos = null;
     this.position();

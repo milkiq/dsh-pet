@@ -26,6 +26,16 @@ import {
   type MenuNode,
 } from '../shared/menu';
 import { petBridge } from './settings';
+// 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹）：两端共用同一份纯计算（src/shared/physics.ts）
+import {
+  estimateReleaseVelocity,
+  springStep,
+  throwBounds,
+  throwStep,
+  trimTrail,
+  type DragSample,
+  type ThrowState,
+} from '../shared/physics';
 import type { ClientConfig, Corner, Pet } from '../shared/types';
 import type * as ReactNS from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
@@ -128,6 +138,15 @@ export function makePetUI(rt: {
     const genRef = useRef(0);
     const dragRef = useRef({ active: false, dragging: false, sx: 0, sy: 0, offX: 0, offY: 0 });
     const justDraggedRef = useRef(false);
+    // 拖拽抛掷物理状态：轨迹样本 / 包围盒左上角实时 px / 弹簧目标与速度 / 弹簧跟随 rAF / 抛掷 rAF
+    const dragTrailRef = useRef<DragSample[]>([]);
+    const boxPxRef = useRef<{ x: number; y: number } | null>(null);
+    const dragTargetRef = useRef<{ x: number; y: number } | null>(null);
+    const dragVelRef = useRef({ vx: 0, vy: 0 });
+    const dragFollowRef = useRef<number | null>(null);
+    const dragFollowTokenRef = useRef(0);
+    const throwRef = useRef<number | null>(null);
+    const throwTokenRef = useRef(0);
     const animRef = useRef(anim);
     animRef.current = anim;
 
@@ -174,7 +193,14 @@ export function makePetUI(rt: {
       switchTo(anim, once);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [anim, once, seq]);
-    useEffect(() => () => stopMove(), []);
+    useEffect(
+      () => () => {
+        stopMove();
+        stopDragFollow();
+        stopThrow();
+      },
+      [],
+    );
     useEffect(
       () => () => {
         if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
@@ -386,7 +412,7 @@ export function makePetUI(rt: {
 
     /** 尝试发起一次移动：占用中返回 true（不重播），无法移动返回 false，成功返回动作名（供日志显示具体动作） */
     const tryMove = (): boolean | string => {
-      if (moveRef.current !== null || pendingMoveRef.current) return true;
+      if (moveRef.current !== null || pendingMoveRef.current || throwRef.current !== null) return true;
       const moves = config.animations.moves;
       const actions = moves.actions;
       if (!actions.length) return false;
@@ -429,6 +455,93 @@ export function makePetUI(rt: {
       }
     };
 
+    // ---- 拖拽抛掷物理（与桌面 renderer.js 同构；纯计算在 shared/physics.ts）----
+    /** 停止弹簧跟随（不碰 dragState：指针捕获期间由 pointerdown/up 独立管理） */
+    const stopDragFollow = () => {
+      dragFollowTokenRef.current++;
+      if (dragFollowRef.current !== null) {
+        cancelAnimationFrame(dragFollowRef.current);
+        dragFollowRef.current = null;
+      }
+      dragTargetRef.current = null;
+      dragVelRef.current = { vx: 0, vy: 0 };
+    };
+    /** 停止抛掷（宠物在空中被抓住/点菜单/回家时立即定格在当前落点） */
+    const stopThrow = () => {
+      throwTokenRef.current++;
+      if (throwRef.current !== null) {
+        cancelAnimationFrame(throwRef.current);
+        throwRef.current = null;
+      }
+    };
+    /** rAF 弹簧跟随：包围盒朝拖拽目标（指针-抓取偏移）过阻尼追赶，抹平高频抖动 */
+    const startDragFollow = (rootEl: HTMLDivElement) => {
+      if (dragFollowRef.current !== null) return;
+      const token = ++dragFollowTokenRef.current;
+      let last = performance.now();
+      const step = () => {
+        if (dragFollowTokenRef.current !== token) return;
+        const target = dragTargetRef.current;
+        if (!target) {
+          dragFollowRef.current = null;
+          return;
+        }
+        const now = performance.now();
+        const dt = Math.min((now - last) / 1000, 1 / 30);
+        last = now;
+        const vel = dragVelRef.current;
+        let x = boxPxRef.current?.x ?? 0;
+        let y = boxPxRef.current?.y ?? 0;
+        vel.vx = springStep(vel.vx, x, target.x, dt);
+        vel.vy = springStep(vel.vy, y, target.y, dt);
+        x += vel.vx * dt;
+        y += vel.vy * dt;
+        boxPxRef.current = { x, y };
+        rootEl.style.left = x + 'px';
+        rootEl.style.top = y + 'px';
+        rootEl.style.right = 'auto';
+        rootEl.style.bottom = 'auto';
+        dragFollowRef.current = requestAnimationFrame(step);
+      };
+      dragFollowRef.current = requestAnimationFrame(step);
+    };
+    /** 抛掷驱动：重力 + 边缘反弹 + 落地摩擦，落定后提交 customPos（飞行中只改 DOM，避免逐帧 React 重渲染） */
+    const startThrow = (px: number, py: number, vx: number, vy: number) => {
+      stopDragFollow();
+      stopMove();
+      const bounds = throwBounds({ W: window.innerWidth, H: window.innerHeight, size, sideAllow });
+      const token = ++throwTokenRef.current;
+      let state: ThrowState = { x: px, y: py, vx, vy };
+      let last = performance.now();
+      const rootEl = rootRef.current;
+      const step = () => {
+        if (throwTokenRef.current !== token) return;
+        const now = performance.now();
+        const dt = (now - last) / 1000;
+        last = now;
+        const res = throwStep(state, dt, bounds);
+        state = { x: res.x, y: res.y, vx: res.vx, vy: res.vy };
+        if (rootEl) {
+          rootEl.style.left = res.x + 'px';
+          rootEl.style.top = res.y + 'px';
+          rootEl.style.right = 'auto';
+          rootEl.style.bottom = 'auto';
+        }
+        boxPxRef.current = { x: res.x, y: res.y };
+        customPosRef.current = {
+          rx: (res.x + halfW) / window.innerWidth,
+          ry: (res.y + halfH) / window.innerHeight,
+        };
+        if (res.atRest) {
+          throwRef.current = null;
+          setCustomPos(customPosRef.current);
+          return;
+        }
+        throwRef.current = requestAnimationFrame(step);
+      };
+      throwRef.current = requestAnimationFrame(step);
+    };
+
     const facingRef = useRef<'left' | 'right'>(facing);
     facingRef.current = facing;
 
@@ -436,8 +549,12 @@ export function makePetUI(rt: {
     const handlePointerDown = (e: ReactNS.PointerEvent<HTMLDivElement>) => {
       // 只认左键：右键进入拖拽判定会与右键菜单打架（右键不拖拽，两端一致）
       if (e.button !== 0) return;
-      e.currentTarget.classList.add('dragging');
+      // 空中抓取：停掉抛掷/漫游/弹簧跟随，从当前落点开始新拖拽
+      stopThrow();
+      stopDragFollow();
       stopMove();
+      dragTrailRef.current = [];
+      e.currentTarget.classList.add('dragging');
       e.currentTarget.setPointerCapture(e.pointerId);
       const rootEl = rootRef.current;
       let offX = 0;
@@ -446,6 +563,7 @@ export function makePetUI(rt: {
         const rr = rootEl.getBoundingClientRect();
         offX = e.clientX - (rr.left + rr.width / 2);
         offY = e.clientY - (rr.top + rr.height / 2);
+        boxPxRef.current = { x: rr.left, y: rr.top };
       }
       dragRef.current = { active: true, dragging: false, sx: e.clientX, sy: e.clientY, offX, offY };
     };
@@ -465,13 +583,13 @@ export function makePetUI(rt: {
           setAnim(name);
         }
       }
+      // 记录指针轨迹（初速估算用；两端同构，桌面记录 screenX/Y）
+      const now = performance.now();
+      dragTrailRef.current = trimTrail([...dragTrailRef.current, { t: now, x: e.clientX, y: e.clientY }], now);
+      // 弹簧目标 = 指针 - 抓取偏移 - half（包围盒左上角），跟随循环逐帧追赶（不再硬贴指针）
+      dragTargetRef.current = { x: e.clientX - d.offX - halfW, y: e.clientY - d.offY - halfH };
       const rootEl = rootRef.current;
-      if (rootEl) {
-        rootEl.style.left = e.clientX - d.offX - halfW + 'px';
-        rootEl.style.top = e.clientY - d.offY - halfH + 'px';
-        rootEl.style.right = 'auto';
-        rootEl.style.bottom = 'auto';
-      }
+      if (rootEl) startDragFollow(rootEl);
       const stageEl = stageRef.current;
       if (stageEl) stageEl.style.transform = 'none';
     };
@@ -481,22 +599,37 @@ export function makePetUI(rt: {
       d.active = false;
       d.dragging = false;
       e.currentTarget.classList.remove('dragging');
+      stopDragFollow();
       if (wasDragging) {
         justDraggedRef.current = true;
         setTimeout(() => {
           justDraggedRef.current = false;
         }, 100);
         setDragging(false);
-        setCustomPos({ rx: (e.clientX - d.offX) / window.innerWidth, ry: (e.clientY - d.offY) / window.innerHeight });
         const stageEl = stageRef.current;
         if (stageEl) stageEl.style.transform = 'translateY(' + bottomPad + 'px)';
         if (config.animations.idle.length) setAnim(pick(config.animations.idle, animRef.current));
         setOnce(false);
+        // 释放位置 = 弹簧跟随的实时包围盒左上角（不是指针目标：跟手滞后时落点跟随宠物实际位置）
+        const bx = boxPxRef.current;
+        const px = bx ? bx.x : e.clientX - d.offX - halfW;
+        const py = bx ? bx.y : e.clientY - d.offY - halfH;
+        // 初速估算：够快就抛掷（重力+边缘反弹+落地摩擦），否则原地放下
+        const vel = estimateReleaseVelocity(dragTrailRef.current, performance.now());
+        dragTrailRef.current = [];
+        if (vel) {
+          // 抛掷：飞行期间由 startThrow 的 rAF 直接写 left/top，落定后才提交 customPos
+          startThrow(px, py, vel.vx, vel.vy);
+        } else {
+          // 原地放下：提交 customPos → React 按 rootStyle（含边界夹取）重排位置
+          setCustomPos({ rx: (px + halfW) / window.innerWidth, ry: (py + halfH) / window.innerHeight });
+        }
       }
     };
     const handleClick = () => {
       const d = dragRef.current;
       if (d.active || d.dragging || justDraggedRef.current) return;
+      stopThrow(); // 点击飞行中的宠物 = 收手停住（再播点击回应）
       stopMove();
       setOnce(true);
       if (!config.animations.clicks.length) return;
@@ -511,7 +644,8 @@ export function makePetUI(rt: {
     // 无「打开网站 / 查看余额」（打开网站=就在网页里；查看余额已由对话框 /balance 命令实现）。
     const handleMenuAction = (leaf: MenuLeaf) => {
       if (leaf.action === 'home') {
-        // 回到初始位置：停漫游/移动，清掉拖拽/漫游留下的会话位置，回配置角落
+        // 回到初始位置：停漫游/移动/抛掷，清掉拖拽/漫游留下的会话位置，回配置角落
+        stopThrow();
         stopMove();
         setCustomPos(null);
         return;
@@ -533,6 +667,7 @@ export function makePetUI(rt: {
       e.stopPropagation(); // 不触碰 DSH 页面任何菜单/右键处理
       const d = dragRef.current;
       if (d.active || d.dragging || justDraggedRef.current) return;
+      stopThrow(); // 菜单弹出前停住飞行中的宠物
       stopMove(); // 菜单悬停期间宠物不漫游
       if (menuRef.current) menuRef.current.close();
       menuRef.current = mountContextMenu({
