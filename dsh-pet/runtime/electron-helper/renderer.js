@@ -6,7 +6,7 @@
  *     （= src/shared 的构建产物，window.PetShared）——与浏览器 bundle 共用同一份源码；
  *   - 配置唯一来源 config.jsonc + 用户覆盖层（/config 合并），加载失败**大声报错**并显示红色错误条
  *     （每 5s 自动重试），绝无静默兜底池；
- *   - 动画素材经宿主 /dsh-pet-7340/thumb/<name>.webm；
+ *   - 动画素材经宿主 /dsh-pet-7340/thumb/<宠物id>/<name>.webm（素材根按宠物归属；
  *   - 几何模型：窗口 = 宠物包围盒 + 四周外扩余量（WINDOW_MARGIN_RATIO，为气泡/弹窗预留空间）。
  *     sprite 固定在窗口内 (margin.l, margin.t) 处，宠物的"移动"由本页把目标屏幕位置
  *     逐帧上报（petBridge.setBounds）→ 主进程按 sprite 位置 + 外扩余量移动窗口；
@@ -39,7 +39,6 @@ const ORIGIN = new URL(CONFIG.configUrl).origin;
 const withSuffix = (suffix) => CONFIG.configUrl.replace(/config\.jsonc$/, suffix);
 const BALANCE_URL = withSuffix('balance');
 const TRIGGER_URL = withSuffix('balance/trigger');
-const ASSET_BASE = withSuffix('thumb/');
 const BUBBLE_DURATION_MS = 10 * 1000; // 余额气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
 // 窗口四周外扩 = 该比例 × 宠物尺寸：为气泡 / 未来可能的弹窗预留显示空间；
 // 外扩区透明且点击穿透（只有身体命中区可交互）。单点可调——按实际观感改这里。
@@ -101,7 +100,21 @@ async function loadConfig() {
     /* 无用户层时忽略 */
   }
   // 合并后统一校验：用户层覆盖缺字段会静默丢配置，缺失即显式报错（与浏览器同一路径）
-  return S.assertClientConfig(S.applyUserOverrides(base, user));
+  const cfg = S.assertClientConfig(S.applyUserOverrides(base, user));
+  // 额外宠物（pet pack）：pet/ 目录文件定义的宠物（自带**完整独立**动画池/权重）。
+  // host 已按同一套规则校验 + 过滤 id 冲突，这里信任其输出；端点失败/缺失时仅主宠物运行。
+  let extra = [];
+  try {
+    const re = await fetch(withSuffix('extra-pets'), { cache: 'no-store' });
+    if (re.ok && re.status !== 204) {
+      const body = await re.json().catch(() => null);
+      if (body && Array.isArray(body.pets)) extra = body.pets;
+    }
+  } catch {
+    /* extra-pets 拉取失败：仅主宠物运行（宿主日志已显式报错） */
+  }
+  if (extra.length) cfg.pets = S.mergeExtraPets(cfg.pets, extra);
+  return cfg;
 }
 
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
@@ -139,10 +152,16 @@ class PetSprite {
     this.pos = { x: 0, y: 0 };
 
     // 播放状态（与浏览器同构）
+    // 动画池与权重按宠物取：文件宠物（pet/ 目录定义，extra）自带**完整独立**动画池；
+    // main 等常规宠物（无 anims 段）用全局 cfg.animations（与浏览器 pet.ts 同一语义）。
+    this.animations = pet.animations || cfg.animations;
+    this.weights = pet.animationWeights || cfg.animationWeights;
+    // 素材根按 assetRoot（文件宠物 = 配置文件前缀，多实例共享同一素材目录）或宠物 id 回落
+    this.assetBase = withSuffix('thumb/' + encodeURIComponent(pet.assetRoot || pet.id) + '/');
     this.front = 0; // 0 = A, 1 = B
     this.pending = null;
     this.gen = 0;
-    this.anim = cfg.animations.idle[0] ?? '';
+    this.anim = this.animations.idle[0] ?? '';
     this.once = true;
     this.facing = 'left';
     // 交互/移动
@@ -227,11 +246,15 @@ class PetSprite {
     // 光标进/出身体命中区时翻转可交互；穿透期间 mousemove 由 main 转发进来（forward:true），
     // mouseleave 保证光标离开窗口立即恢复穿透（透明像素不挡下层应用，与浏览器一致）。
     window.addEventListener('mousemove', (e) => this.onMouseMove(e), { signal: ac.signal });
-    window.addEventListener('mouseleave', () => {
-      // 光标离开窗口：若菜单开着立刻收起（菜单是窗口内 DOM，离开即不可达），再恢复穿透
-      this.closeMenu();
-      this.setInteractive(false);
-    }, { signal: ac.signal });
+    window.addEventListener(
+      'mouseleave',
+      () => {
+        // 光标离开窗口：若菜单开着立刻收起（菜单是窗口内 DOM，离开即不可达），再恢复穿透
+        this.closeMenu();
+        this.setInteractive(false);
+      },
+      { signal: ac.signal },
+    );
   }
 
   dispose() {
@@ -304,7 +327,7 @@ class PetSprite {
     const target = this.front === 0 ? this.videoB : this.videoA;
     const el = target;
     if (!el) return;
-    el.src = ASSET_BASE + encodeURIComponent(next) + '.webm';
+    el.src = this.assetBase + encodeURIComponent(next) + '.webm';
     el.loop = !nextOnce;
     el.muted = true;
     el.autoplay = true;
@@ -345,7 +368,7 @@ class PetSprite {
   // 动画链（与浏览器 pickNext 语义一致，纯逻辑在 shared）
   playIdle() {
     this.stopMove();
-    const { animations, animationWeights } = this.cfg;
+    const { animations, animationWeights } = { animations: this.animations, animationWeights: this.weights };
     const roll = Math.random();
     const k = S.rollKind(roll, animationWeights);
     let next;
@@ -374,7 +397,7 @@ class PetSprite {
 
   handleEnded() {
     if (this.dragState.active) return;
-    const { animations } = this.cfg;
+    const { animations } = { animations: this.animations };
     // 事件动画播完：回 idle（与 drag/clicks 同分支，不进随机链）；气泡由定时器自动消失，与动画解耦
     const isEvent = Object.values(animations.events ?? {}).some((pool) => pool.includes(this.anim));
     if (isEvent) {
@@ -395,12 +418,12 @@ class PetSprite {
   // ---- 漫游（rAF 驱动，动画首尾各 leadSec/tailSec 秒原地不动；几何在 shared/planMove） ----
   tryMove() {
     if (this.moveRef !== null || this.pendingMove || this.throwRef !== null) return true;
-    const moves = this.cfg.animations.moves;
+    const moves = this.animations.moves;
     const actions = moves.actions;
     if (!actions.length) return false;
     const chosen = actions[Math.floor(Math.random() * actions.length)];
     const mp = Object.assign({}, moves.default, chosen.params || {});
-    const dir = (this.facing === 'right') !== this.cfg.animations.turn.includes(this.anim) ? 1 : -1;
+    const dir = (this.facing === 'right') !== this.animations.turn.includes(this.anim) ? 1 : -1;
     const W = VIEW.w;
     const H = VIEW.h;
     const distScale = this.size / S.PET_REF_WIDTH;
@@ -621,8 +644,8 @@ class PetSprite {
       d.dragging = true;
       // 真正开始拖拽才把舞台拍平（人物随光标拿起；与浏览器 dragging 语义一致）
       this.stage.style.transform = 'none';
-      if (this.cfg.animations.drag.length) {
-        this.playOnce(S.pick(this.cfg.animations.drag));
+      if (this.animations.drag.length) {
+        this.playOnce(S.pick(this.animations.drag));
       }
     }
     // 记录指针轨迹（screenX/Y 采样：与视口坐标只差常数偏移，速度一致；初速估算用）
@@ -650,11 +673,18 @@ class PetSprite {
       }, 100);
       if (e && Number.isFinite(e.screenX)) {
         // 原始输入留痕（实机排查用：验证指针屏幕坐标与窗口位移是否一致，如 DPI 缩放问题）
-        window.__dshPetDebug.lastDragRaw = { petX: d.petX, petY: d.petY, sxDown: d.sx, syDown: d.sy, xUp: e.screenX, yUp: e.screenY };
+        window.__dshPetDebug.lastDragRaw = {
+          petX: d.petX,
+          petY: d.petY,
+          sxDown: d.sx,
+          syDown: d.sy,
+          xUp: e.screenX,
+          yUp: e.screenY,
+        };
       }
       // 释放后接一段循环待机（与浏览器一致），再回随机链
-      if (this.cfg.animations.idle.length) {
-        const name = S.pick(this.cfg.animations.idle, this.anim);
+      if (this.animations.idle.length) {
+        const name = S.pick(this.animations.idle, this.anim);
         this.anim = name;
         this.once = false;
         this.switchTo(name, false);
@@ -714,9 +744,9 @@ class PetSprite {
     if (d.active || d.dragging || this.justDragged) return;
     this.stopThrow(); // 点击飞行中的宠物 = 收手停住（再播点击回应）
     this.stopMove();
-    if (!this.cfg.animations.clicks.length) return;
+    if (!this.animations.clicks.length) return;
     this.pendingSquash = true; // 等新点击动画切到前台后 Q 弹（压新首帧，与浏览器一致）
-    this.playOnce(S.pick(this.cfg.animations.clicks));
+    this.playOnce(S.pick(this.animations.clicks));
   }
 
   // ---- 右键菜单（统一自绘组件：树+渲染都来自 shared-core 的同一份 menu 模块） ----
@@ -730,7 +760,7 @@ class PetSprite {
     const tools = [{ label: '打开网站', action: 'open-site' }];
     if (this.pet.balanceEnabled) tools.push({ label: '查看余额', action: 'show-balance' });
     tools.push({ label: '回到初始位置', action: 'home' });
-    const tree = tools.concat(S.buildMenuTree(this.cfg.animations));
+    const tree = tools.concat(S.buildMenuTree(this.animations));
     if (!tree.length) return;
     this.menuOpen = true;
     this.setInteractive(true); // 菜单是窗口内 DOM：悬停期间整窗保持可交互，关闭后恢复命中区穿透
@@ -766,7 +796,7 @@ class PetSprite {
     }
     if (!leaf.anim) return;
     // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与浏览器随机链"朝右不选文字"同语义）
-    if (S.isNoMirrorAnimation(this.cfg.animations.categories, leaf.anim) && this.facing === 'right') {
+    if (S.isNoMirrorAnimation(this.animations.categories, leaf.anim) && this.facing === 'right') {
       this.facing = 'left';
     }
     this.playOnce(leaf.anim);
@@ -822,7 +852,7 @@ class PetSprite {
     if (!state || !state.ok) return;
     const p = S.balancePercent(state);
     if (p === undefined) return; // 当前数据源没有百分比语义：不触发档位动画
-    const pool = this.cfg.animations.events?.balance;
+    const pool = this.animations.events?.balance;
     if (!pool || pool.length === 0) {
       console.error('[dsh-pet] 配置缺少 animations.events.balance，无法播放余额事件动画');
       return;

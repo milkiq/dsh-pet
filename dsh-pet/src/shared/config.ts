@@ -51,8 +51,17 @@ export function assertClientConfig(raw: unknown): ClientConfig {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cfg = raw as Record<string, any>;
 
-  // ---- pets ----
-  const petsArr = cfg.pets;
+  return {
+    notificationsEnabled: assertNotificationsEnabled(cfg),
+    pets: assertPetsBlock(cfg.pets),
+    animations: assertAnimationsBlock(cfg.animations),
+    animationWeights: assertWeightsBlock(cfg.animationWeights),
+    eventsRefreshSec: assertEventsRefreshSec(cfg.eventsRefreshSec),
+  };
+}
+
+/** 校验 pets 数组（主配置与文件宠物共用同一套规则）：非空、每只 id/size/balanceEnabled/display/position 完整合法、id 唯一 */
+export function assertPetsBlock(petsArr: unknown): Pet[] {
   if (!Array.isArray(petsArr) || !petsArr.length) throw new Error('dsh-pet: 缺少 pets');
   const seen = new Set<string>();
   const pets: Pet[] = [];
@@ -81,29 +90,42 @@ export function assertClientConfig(raw: unknown): ClientConfig {
       position: { corner: corner as Corner, marginX, marginY },
     });
   }
+  return pets;
+}
 
-  // ---- animations ----
-  const a = cfg.animations;
+/** 校验系统通知总开关（必填布尔值） */
+function assertNotificationsEnabled(cfg: Record<string, unknown>): boolean {
+  const notificationsEnabled = cfg.notificationsEnabled;
+  if (typeof notificationsEnabled !== 'boolean')
+    throw new Error('dsh-pet: 缺少 notificationsEnabled（需为布尔值 true/false）');
+  return notificationsEnabled;
+}
+
+/** 校验 config.jsonc / 文件宠物配置里的 animations 段；缺失/非法即配置错误抛出（完整校验，无兜底） */
+export function assertAnimationsBlock(a: unknown): Animations {
   if (!a || typeof a !== 'object') throw new Error('dsh-pet: 缺少 animations');
+  const anims = a as Record<string, unknown>;
   for (const key of ['idle', 'turn', 'drag', 'clicks']) {
-    if (!Array.isArray(a[key])) throw new Error('dsh-pet: animations.' + key + ' 缺失');
+    if (!Array.isArray(anims[key])) throw new Error('dsh-pet: animations.' + key + ' 缺失');
   }
+  const moves = anims.moves;
   if (
-    !a.moves ||
-    typeof a.moves !== 'object' ||
-    typeof a.moves.default !== 'object' ||
-    a.moves.default === null ||
-    !Array.isArray(a.moves.actions)
+    !moves ||
+    typeof moves !== 'object' ||
+    typeof (moves as Record<string, unknown>).default !== 'object' ||
+    (moves as Record<string, unknown>).default === null ||
+    !Array.isArray((moves as Record<string, unknown>).actions)
   ) {
     throw new Error('dsh-pet: animations.moves 结构非法');
   }
-  if (!Array.isArray(a.categories)) throw new Error('dsh-pet: animations.categories 缺失');
+  if (!Array.isArray(anims.categories)) throw new Error('dsh-pet: animations.categories 缺失');
 
   // ---- animations.events（事件动画：事件名 → 非空 string 数组，数组顺序即档位顺序）----
   // 事件功能已内置：events 段与 balance 事件均为必需，缺失即配置不完整，显式报错
-  const ev = a.events;
+  const ev = anims.events;
   if (!ev || typeof ev !== 'object' || Array.isArray(ev)) throw new Error('dsh-pet: 缺少 animations.events');
-  for (const [eventName, pool] of Object.entries(ev)) {
+  const evEntries = ev as Record<string, unknown>;
+  for (const [eventName, pool] of Object.entries(evEntries)) {
     if (!Array.isArray(pool) || pool.length === 0) {
       throw new Error('dsh-pet: animations.events.' + eventName + ' 必须是非空动画名数组');
     }
@@ -113,23 +135,28 @@ export function assertClientConfig(raw: unknown): ClientConfig {
       }
     }
   }
-  const balance = ev.balance;
+  const balance = evEntries.balance;
   if (!Array.isArray(balance) || balance.length === 0) {
     throw new Error('dsh-pet: animations.events.balance 缺失或为空（余额事件必备）');
   }
+  return a as Animations;
+}
 
-  // ---- animationWeights ----
-  const w = cfg.animationWeights;
+/** 校验 animationWeights 段（idle/turn/move 三个非负数字） */
+export function assertWeightsBlock(w: unknown): Weights {
   if (!w || typeof w !== 'object') throw new Error('dsh-pet: 缺少 animationWeights');
+  const weights = w as Record<string, unknown>;
   for (const key of ['idle', 'turn', 'move']) {
-    const v = Number(w[key]);
+    const v = Number(weights[key]);
     if (!Number.isFinite(v) || v < 0) throw new Error('dsh-pet: animationWeights.' + key + ' 非法');
-    w[key] = v;
+    weights[key] = v;
   }
+  return w as Weights;
+}
 
-  // ---- eventsRefreshSec（事件刷新周期：事件名 → 正数秒数）----
-  // 事件功能已内置：周期段与 balance 周期均为必需，缺失/非法即配置不完整，显式报错
-  const ers = cfg.eventsRefreshSec;
+/** 校验 eventsRefreshSec 段（事件名 → 正数秒数）；balance 周期必填 */
+function assertEventsRefreshSec(raw: unknown): Record<string, number> {
+  const ers = raw;
   if (!ers || typeof ers !== 'object' || Array.isArray(ers)) throw new Error('dsh-pet: 缺少 eventsRefreshSec');
   const cleaned: Record<string, number> = {};
   for (const [eventName, sec] of Object.entries(ers)) {
@@ -140,14 +167,45 @@ export function assertClientConfig(raw: unknown): ClientConfig {
   }
   const balanceSec = cleaned.balance;
   if (balanceSec === undefined) throw new Error('dsh-pet: eventsRefreshSec.balance 缺失（余额事件周期必备）');
-
-  // ---- notificationsEnabled（系统通知总开关：必填布尔值）----
-  const notificationsEnabled = cfg.notificationsEnabled;
-  if (typeof notificationsEnabled !== 'boolean')
-    throw new Error('dsh-pet: 缺少 notificationsEnabled（需为布尔值 true/false）');
-
-  return { notificationsEnabled, pets, animations: a, animationWeights: w, eventsRefreshSec: cleaned };
+  return cleaned;
 }
+
+/**
+ * 文件定义宠物（`pet/<名>-config.json`）：与 config.jsonc 同构的**植物种类**配置。
+ * 该文件定义一个「种类」：animations / animationWeights 为该种类独有的动画池（不回落全局），
+ * 素材目录为 `pet/<名>-animation/`（`<名>` = 文件名前缀）；pets 数组可放该种类的**任意多只
+ * 实例**（id 随意、互相唯一），每只共享动画池与素材，素材 URL 用资产根 `<名>` 而非实例 id。
+ * 校验只覆盖「种类相关」字段（pets / animations / animationWeights，与主配置同一套规则）；
+ * notificationsEnabled / eventsRefreshSec 是全局属性，不归宠物文件管——写了忽略、不写不报错。
+ */
+export interface ExtraPetFile {
+  /** 该种类的所有实例（已打 assetRoot 标记） */
+  pets: Pet[];
+  animations: Animations;
+  animationWeights: Weights;
+}
+
+/**
+ * 校验 `pet/<名>-config.json` 解析结果：pets（每只字段完整、id 唯一）+ animations +
+ * animationWeights 按主配置同一套规则校验，然后按文件名前缀 `<名>` 给每只实例打 assetRoot
+ * 标记；任一不符即 throw（调用方跳过该宠物并显式报错）。
+ */
+export function assertExtraPetFile(raw: unknown, assetRoot: string): ExtraPetFile {
+  if (!raw || typeof raw !== 'object') throw new Error('dsh-pet: 额外宠物配置非对象');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cfg = raw as Record<string, any>;
+  return {
+    pets: assertPetsBlock(cfg.pets).map((pet) => ({ ...pet, assetRoot })),
+    animations: assertAnimationsBlock(cfg.animations),
+    animationWeights: assertWeightsBlock(cfg.animationWeights),
+  };
+}
+
+/** 合并文件定义宠物进宠物列表：追加 + 打 extra 标记（host 已保证 id 无冲突，这里只做拼接） */
+export const mergeExtraPets = (base: Pet[], extra: Pet[]): Pet[] => [
+  ...base,
+  ...extra.map((e) => ({ ...e, extra: true as const })),
+];
 
 /** 合并宠物：用户层（{ pets }，与 jsonc 同构）全量替换默认；无用户层回落默认 */
 export function resolvePets(defaults: Pet[], user: { pets?: Pet[] }): Pet[] {

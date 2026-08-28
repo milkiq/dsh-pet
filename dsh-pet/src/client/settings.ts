@@ -72,6 +72,8 @@ export const zh = {
   loadError: '加载配置失败',
   invalid: '请检查输入：大小需为正数，边距可为任意数字。',
   busy: '保存中…',
+  extraPetsHint:
+    '另 {n} 只额外宠物由 pet/ 目录文件定义（<名>-config.json + <名>-animation/），它们不在此列表——改文件即生效，刷新可见。',
   notifyToggle: '系统通知',
   notifyToggleHint: '对话完成 / 生成失败 / 权限申请 / 用户选择，在窗口失焦时弹出系统级通知（桌面右下角）。',
   notifyGetPermission: '获取权限',
@@ -126,6 +128,8 @@ export const en = {
   loadError: 'Failed to load config',
   invalid: 'Check your input: size must be positive; margins can be any number.',
   busy: 'Saving…',
+  extraPetsHint:
+    '{n} extra pet(s) are file-defined in the pet/ directory (<name>-config.json + <name>-animation/). They are not in this list — edit the files, then refresh.',
   notifyToggle: 'System notifications',
   notifyToggleHint:
     'OS-level toasts (bottom-right of the desktop) for conversation completion, failures, permission requests, and questions — only while this window is unfocused.',
@@ -190,7 +194,9 @@ export function makePetConfigSection(rt: {
   };
 
   return function PetConfigSection() {
-    const initPets = petBridge.current;
+    const initPets = petBridge.current.filter((p) => !p.extra);
+    // 文件定义宠物数量（pet/ 目录，不在本编辑列表；仅展示提示）
+    const extraCount = petBridge.current.filter((p) => p.extra).length;
     const [pets, setPets] = useState<Pet[]>(initPets.map((p) => ({ ...p, position: { ...p.position } })));
     const [selId, setSelId] = useState<string>(initPets[0]?.id ?? '');
     const [busy, setBusy] = useState(false);
@@ -417,6 +423,18 @@ export function makePetConfigSection(rt: {
           },
           children: t('intro'),
         }),
+        // 额外宠物提示（文件定义，不在此编辑列表）
+        extraCount > 0
+          ? h('p', {
+              style: {
+                margin: 0,
+                fontSize: '12px',
+                color: 'var(--dsw-alias-label-tertiary)',
+                lineHeight: '18px',
+              },
+              children: t('extraPetsHint').replace('{n}', String(extraCount)),
+            })
+          : null,
 
         // 宠物列表 + 添加
         h('div', {

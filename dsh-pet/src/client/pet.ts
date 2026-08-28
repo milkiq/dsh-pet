@@ -10,6 +10,7 @@ import {
   EMPTY_CONF,
   applyUserOverrides,
   isWebVisible,
+  mergeExtraPets,
   stripJsonc,
   type UserOverrides,
 } from '../shared/config';
@@ -108,9 +109,13 @@ export function makePetUI(rt: {
     const [size, setSize] = useState(cfg.size);
     const halfW = size / 2;
     const halfH = (size * 9) / 16 / 2;
+    // 动画池与权重按宠物取：文件宠物（pet/ 目录定义，extra）自带**完整独立**动画池；
+    // main 等常规宠物（无 anims 段）用全局 config.animations（现有语义，不回落方向相反）。
+    const petAnims = cfg.animations ?? config.animations;
+    const petWeights = cfg.animationWeights ?? config.animationWeights;
 
     // ---- React 状态 ----
-    const [anim, setAnim] = useState(config.animations.idle[0] ?? '');
+    const [anim, setAnim] = useState(petAnims.idle[0] ?? '');
     const [once, setOnce] = useState(true);
     const [facing, setFacing] = useState('left' as 'left' | 'right');
     const [dragging, setDragging] = useState(false);
@@ -167,7 +172,12 @@ export function makePetUI(rt: {
       const target = frontRef.current === 0 ? videoBRef : videoARef;
       const el = target.current;
       if (!el) return;
-      el.src = '/dsh-pet-7340/thumb/' + encodeURIComponent(next) + THUMB_EXT;
+      el.src =
+        '/dsh-pet-7340/thumb/' +
+        encodeURIComponent(cfg.assetRoot ?? cfg.id) +
+        '/' +
+        encodeURIComponent(next) +
+        THUMB_EXT;
       el.loop = !nextOnce;
       el.muted = true;
       el.autoplay = true;
@@ -242,7 +252,7 @@ export function makePetUI(rt: {
       if (!balance || !balance.ok) return;
       const p = balancePercent(balance);
       if (p === undefined) return; // 当前数据源没有百分比语义（如 DeepSeek 余额），不触发档位动画
-      const pool = config.animations.events?.balance;
+      const pool = petAnims.events?.balance;
       if (!pool || pool.length === 0) {
         console.error('[dsh-pet] 配置缺少 animations.events.balance，无法播放余额事件动画');
         return;
@@ -282,7 +292,8 @@ export function makePetUI(rt: {
 
     // ---- 动画链：播完按权重选下一个 ----
     const pickNext = () => {
-      const { animations, animationWeights } = config;
+      const animations = petAnims;
+      const animationWeights = petWeights;
       const roll = Math.random();
       const k = rollKind(roll, animationWeights);
       let kind: string;
@@ -335,7 +346,7 @@ export function makePetUI(rt: {
       // 只认前台视频触发的 ended：后台（被降级停播）视频即便有残留事件也一律丢弃，防止掐断当前动画
       const evEl = e && (e.currentTarget as HTMLVideoElement | null);
       if (evEl && !evEl.classList.contains('is-front')) return;
-      const { animations } = config;
+      const animations = petAnims;
       if (dragRef.current.active) return;
       // 事件动画播完：回 idle（与 drag/clicks 同分支，不进入随机链）；气泡由定时器自动消失，与动画解耦
       const isEvent = Object.values(animations.events ?? {}).some((pool) => pool.includes(animRef.current));
@@ -427,12 +438,12 @@ export function makePetUI(rt: {
     /** 尝试发起一次移动：占用中返回 true（不重播），无法移动返回 false，成功返回动作名（供日志显示具体动作） */
     const tryMove = (): boolean | string => {
       if (moveRef.current !== null || pendingMoveRef.current || throwRef.current !== null) return true;
-      const moves = config.animations.moves;
+      const moves = petAnims.moves;
       const actions = moves.actions;
       if (!actions.length) return false;
       const chosen = actions[Math.floor(Math.random() * actions.length)];
       const mp = Object.assign({}, moves.default, chosen.params || {});
-      const dir = (facingRef.current === 'right') !== config.animations.turn.includes(animRef.current) ? 1 : -1;
+      const dir = (facingRef.current === 'right') !== petAnims.turn.includes(animRef.current) ? 1 : -1;
       const W = window.innerWidth;
       // 移动距离随宠物缩放：config 的 minDist/maxDist 是基准尺寸（462px 宽）下的 px，
       // 按 实际size/基准 等比缩放 —— 小宠物挪小步、大宠物挪大步，与人物自身大小匹配
@@ -633,8 +644,8 @@ export function makePetUI(rt: {
         d.dragging = true;
         setDragging(true);
         setOnce(true);
-        if (config.animations.drag.length) {
-          const name = pick(config.animations.drag);
+        if (petAnims.drag.length) {
+          const name = pick(petAnims.drag);
           console.log('[dsh-pet] ' + new Date().toTimeString().slice(0, 8) + ' pet=' + cfg.id + ' -> [DRAG] ' + name);
           setAnim(name);
         }
@@ -664,7 +675,7 @@ export function makePetUI(rt: {
         setDragging(false);
         const stageEl = stageRef.current;
         if (stageEl) stageEl.style.transform = 'translateY(' + bottomPad + 'px)';
-        if (config.animations.idle.length) setAnim(pick(config.animations.idle, animRef.current));
+        if (petAnims.idle.length) setAnim(pick(petAnims.idle, animRef.current));
         setOnce(false);
         // 释放位置 = 弹簧跟随的实时包围盒左上角（不是指针目标：跟手滞后时落点跟随宠物实际位置）
         const bx = boxPxRef.current;
@@ -688,8 +699,8 @@ export function makePetUI(rt: {
       stopThrow(); // 点击飞行中的宠物 = 收手停住（再播点击回应）
       stopMove();
       setOnce(true);
-      if (!config.animations.clicks.length) return;
-      const name = pick(config.animations.clicks);
+      if (!petAnims.clicks.length) return;
+      const name = pick(petAnims.clicks);
       console.log('[dsh-pet] ' + new Date().toTimeString().slice(0, 8) + ' pet=' + cfg.id + ' -> [CLICK] ' + name);
       pendingSquashRef.current = true; // 等新点击动画切到前台后 Q 弹（压新首帧）
       setAnim(name);
@@ -709,7 +720,7 @@ export function makePetUI(rt: {
       }
       if (!leaf.anim) return;
       // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与随机链"朝右不选文字"同语义）
-      if (isNoMirrorAnimation(config.animations.categories, leaf.anim) && facingRef.current === 'right') {
+      if (isNoMirrorAnimation(petAnims.categories, leaf.anim) && facingRef.current === 'right') {
         setFacing('left');
       }
       stopMove();
@@ -718,7 +729,7 @@ export function makePetUI(rt: {
     };
     const handleContextMenu = (e: ReactNS.MouseEvent<HTMLDivElement>) => {
       // 工具项（回到初始位置，两端共用）+ 动作树（动作→分类→具体动画）
-      const tree: MenuNode[] = [{ label: '回到初始位置', action: 'home' }, ...buildMenuTree(config.animations)];
+      const tree: MenuNode[] = [{ label: '回到初始位置', action: 'home' }, ...buildMenuTree(petAnims)];
       if (!tree.length) return;
       e.preventDefault();
       e.stopPropagation(); // 不触碰 DSH 页面任何菜单/右键处理
@@ -803,6 +814,8 @@ export function makePetUI(rt: {
   function PetMulti() {
     const [pets, setPets] = useState<Pet[]>([]);
     const [ready, setReady] = useState(false);
+    // 文件宠物（pet/ 目录定义）：加载后填充；设置页 sync 过来的列表不含它们，这里统一合并回去
+    const extrasRef = useRef<Pet[]>([]);
     // 余额状态（容器统一拉取，PetCard 共享；balanceTick 每次成功拉取递增，驱动事件动画）
     const [balance, setBalance] = useState<BalanceState | null>(null);
     const [balanceTick, setBalanceTick] = useState(0);
@@ -826,13 +839,30 @@ export function makePetUI(rt: {
           // 合并后统一校验：用户层覆盖可能缺字段（如 moves/events），直接整体替换会静默丢失，
           // 这里对最终配置再跑一遍 assertClientConfig —— 缺失即显式报错，不静默运行残缺配置
           config = assertClientConfig(applyUserOverrides(config, user));
-          const merged = config.pets;
+          // 额外宠物（pet pack）：pet/ 目录文件定义的宠物（自带完整动画池/权重）。
+          // host 已按同一套规则校验 + 过滤 id 冲突，这里信任其输出，不重复校验；
+          // 端点失败/缺失时仅主宠物运行（宿主日志已显式报错）。
+          let extra: Pet[] = [];
+          try {
+            const r3 = await fetch('/dsh-pet-7340/extra-pets');
+            if (r3.ok && r3.status !== 204) {
+              const body = await r3.json().catch(() => null);
+              if (body && Array.isArray(body.pets)) extra = body.pets as Pet[];
+            }
+          } catch {
+            /* extra-pets 拉取失败：仅主宠物运行 */
+          }
+          extrasRef.current = extra;
+          const merged = mergeExtraPets(config.pets, extrasRef.current);
           if (!alive) return;
           petBridge.current = merged;
           petBridge.template = defaults.length ? defaults[0] : undefined;
           petBridge.sync = (list: Pet[]) => {
-            setPets(list);
-            petBridge.current = list;
+            // 设置页保存的是「可编辑宠物」列表（文件宠物已排除）；这里自动把文件宠物合并回来，
+            // 保证设置页保存/恢复默认后额外宠物仍然在线
+            const next = mergeExtraPets(list, extrasRef.current);
+            setPets(next);
+            petBridge.current = next;
           };
           setPets(merged);
           setReady(true);

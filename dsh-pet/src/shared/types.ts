@@ -58,7 +58,16 @@ export interface Animations {
   events: Events;
 }
 
-/** 一只宠物（与 jsonc pets[i] 同形，position 嵌套） */
+/** 一只宠物（与 jsonc pets[i] 同形，position 嵌套）。
+ *  可选段（animations / animationWeights / extra / assetRoot）为「文件定义宠物」专用：
+ *  - animations / animationWeights 由 `pet/<名>-config.json` 提供：该宠物所属**种类**的
+ *    完整独立动画池与权重（不回落全局 config.animations——文件宠物即完整声明，配置即种类）。
+ *    一个 `-config.json` 的 pets 数组可放该种类的**任意多只实例**，共享同一动画池与素材目录。
+ *  - extra: true 标记该宠物由 pet/ 目录文件定义：设置页不可编辑、保存时排除，
+ *    由合并逻辑（src/shared 的 mergeExtraPets）统一打标，**永不出现在持久化配置里**。
+ *  - assetRoot: 素材目录名（= 配置文件前缀 `<名>`，即 `pet/<名>-animation/`）；素材 URL
+ *    用它而不是 id——多实例共享同一素材目录。main 等常规宠物缺省回落自身 id。
+ */
 export interface Pet {
   id: string;
   size: number;
@@ -67,6 +76,10 @@ export interface Pet {
   /** 显示位置（web/desktop/both/none，必填）：缺失即配置错误，代码不做兜底 */
   display: PetDisplay;
   position: { corner: Corner; marginX: number; marginY: number };
+  animations?: Animations;
+  animationWeights?: Weights;
+  extra?: boolean;
+  assetRoot?: string;
 }
 
 /** config.jsonc 全集——运行时直接使用（ANIM 即本类型） */

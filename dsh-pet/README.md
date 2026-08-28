@@ -43,7 +43,7 @@ dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-
   - `web` = 仅浏览器 overlay / `desktop` = 仅桌面模式 / `both` = 两者都显示 / `none` = 都不显示
   - 桌面模式渲染 `display` 含 `desktop` 的**全部**宠物（多开同屏，与浏览器一致）；大小/位置各自读自己的配置
   - 在 DSH 设置页「桌宠配置」编辑，保存即时生效；`display` 缺失/非法即配置错误，**代码不做兜底**
-- 桌面与浏览器是**同一套动画素材**（`/dsh-pet-7340/thumb/<name>.webm`，用户 `main-animation/` 目录同样优先）；配置加载失败会**大声报错**（红色错误条 + 每 5 秒自动重试），绝不静默兜底
+- 桌面与浏览器是**同一套动画素材**（`/dsh-pet-7340/thumb/<前缀>/<name>.webm`：main 用用户 `main-animation/` 目录优先 + 包内素材；额外宠物只查自己的 `pet/<前缀>-animation/`，同种类多实例共享）；配置加载失败会**大声报错**（红色错误条 + 每 5 秒自动重试），绝不静默兜底
 
 ## ✨ 功能特性
 
@@ -82,6 +82,56 @@ dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-
 - 格式：`.webm` 需 **VP9 Alpha** 编码（Chrome/Edge/Firefox），与包内素材同规范，普通编码会有黑底
 - 修改用户配置后同样**刷新页面**生效
 - 动画名请对照默认配置填写，避免引用不存在的动画
+
+### 🐾 额外宠物（pet pack）——添加新「种类」
+
+默认只能调整主宠物（`config.jsonc` / `main-config.json` 的 `pets`）。要添加**全新种类的宠物**（独立动画池 + 自己的素材），在用户数据根下建 `pet/` 目录：
+
+```
+$DSH_HOME/dsh-pet/pet/
+├─ pig-config.json        ← 额外宠物 pig 的配置（命名词干 = 宠物 id）
+└─ pig-animation/         ← pig 自己的动画素材（直接平铺 .webm，仿 main-animation）
+   ├─ 待机.webm
+   └─ 打滚.webm
+```
+
+每只额外宠物 = 一个 `-config.json`（配置）+ 一个 `-animation/` 目录（素材），同前缀配对，扫描 `pet/` 自动发现（浏览器与桌面同时生效，无需重启）。
+
+配置文件**与 `main-config.json` / `config.jsonc` 完全同构**——直接复制一份 main 配置、换成自己的动画池，就是一只新宠物。一个 `-config.json` 定义**一个「种类」**（动画池 + 素材目录），`pets` 数组可放该种类的**任意多只实例**（每只独立 size/位置，共享动画池与素材）：
+
+```jsonc
+// pet/pig-config.json —— 与 main-config.json 同构的完整配置；animations / animationWeights 必填（不回落全局）
+{
+  "notificationsEnabled": true,
+  "pets": [
+    {
+      "id": "pig1",                            // 实例 id（可多只；不必等于文件名前缀）
+      "size": 420,
+      "balanceEnabled": true,
+      "display": "both",                        // web / desktop / both / none
+      "position": { "corner": "top-right", "marginX": 24, "marginY": 100 }
+    },
+    { "id": "pig2", "size": 360, "balanceEnabled": false, "display": "web", "position": { "corner": "top-left", "marginX": 24, "marginY": 100 } }
+  ],
+  "animations": {
+    "idle": ["待机"], "turn": [], "drag": [], "clicks": ["打滚"],
+    "moves": { "default": { "minDist": 80, "maxDist": 360, "margin": 20, "leadSec": 2, "tailSec": 2 }, "actions": [] },
+    "categories": [],
+    "events": { "balance": ["余额-钱袋满溢", "余额-金袋叮当", "余额-钱袋如常", "余额-数金皱眉", "余额-袋空如洗", "余额-分文不剩"] }
+  },
+  "animationWeights": { "idle": 80, "turn": 0, "move": 0 },
+  "eventsRefreshSec": { "balance": 1800 }
+}
+```
+
+规则（与主宠物严格隔离，绝不混用）：
+- **素材只查自己的**：素材目录名 = 文件名前缀（`pet/pig-config.json` → `pet/pig-animation/`），该种类所有实例共用；动画 URL 为 `/thumb/<前缀>/<名>.webm`，查不到即 404 报错——**绝不落到 `main-animation` 或包内素材**
+- **动画池不回落全局**：`animations` / `animationWeights` 是该种类的（结构校验与主配置同一套规则）
+- `pets` 数组非空、每只字段（id/size/balanceEnabled/display/position）完整合法、数组内 id 唯一——**id 随意写、数量随意**，与主配置完全一致
+- `notificationsEnabled` / `eventsRefreshSec` 是**全局属性**，不归宠物文件管：写了忽略、不写不报错
+- 配置非法 / 缺少 `-animation/` 目录 / 实例 id 与主宠物冲突 → 加载时显式报错并跳过该宠物（不影响其他宠物）
+- 设置页**不列出**文件宠物（改文件即生效，刷新可见）；设置页保存/恢复默认不会把它们写进 `main-config.json`
+- 添加/修改/删除 → 刷新页面（浏览器）或重启 Helper（桌面）生效
 
 ## 🗑️ 卸载
 

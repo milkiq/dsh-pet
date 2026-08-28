@@ -247,6 +247,54 @@ DSH 设置 → 「桌宠配置」：
 
 > 覆盖语义：用户层给出即**整体替换**该字段（如写了 `animations` 就用你的整份动画池，替代默认），没写的字段回落包内默认。校验在插件加载时执行——格式错误会在 DSH 控制台显式报错，不会静默运行残缺配置。
 
+### 方式四：额外宠物（pet pack）——添加新「种类」
+
+方式一~三都只调整**默认宠物的实例**（数量/大小/位置），动画池始终是全局一份。要添加**全新种类的宠物**（独立动画池 + 自己的素材），在用户数据根下建 `pet/` 目录：
+
+```
+$DSH_HOME/dsh-pet/
+├─ main-config.json            ← 主宠物配置（现有，不动）
+├─ main-animation/webm/*.webm  ← 主宠物素材（现有，只属于 main）
+└─ pet/
+   ├─ pig-config.json          ← 额外宠物 pig 的配置（命名词干 = 宠物 id）
+   └─ pig-animation/*.webm     ← pig 自己的动画素材（直接平铺，仿 main-animation）
+```
+
+每只额外宠物 = 一个 `-config.json` + 一个 `-animation/` 目录，同前缀配对；扫描 `pet/` 自动发现，浏览器与桌面同时生效。一个 `-config.json` 定义**一个「种类」**（动画池 + 素材目录），`pets` 数组可放该种类的**任意多只实例**（共享动画池与素材）：
+
+```jsonc
+// pet/pig-config.json —— 与 main-config.json 同构的完整配置
+{
+  "notificationsEnabled": true,
+  "pets": [
+    {
+      "id": "pig1",              // 实例 id（可多只；不必等于文件名前缀）
+      "size": 420,
+      "balanceEnabled": true,
+      "display": "both",        // web / desktop / both / none
+      "position": { "corner": "top-right", "marginX": 24, "marginY": 100 }
+    },
+    { "id": "pig2", "size": 360, "balanceEnabled": false, "display": "web", "position": { "corner": "top-left", "marginX": 24, "marginY": 100 } }
+  ],
+  "animations": {
+    "idle": ["待机"], "turn": [], "drag": [], "clicks": ["打滚"],
+    "moves": { "default": { "minDist": 80, "maxDist": 360, "margin": 20, "leadSec": 2, "tailSec": 2 }, "actions": [] },
+    "categories": [],
+    "events": { "balance": ["余额-钱袋满溢", "余额-金袋叮当", "余额-钱袋如常", "余额-数金皱眉", "余额-袋空如洗", "余额-分文不剩"] }
+  },
+  "animationWeights": { "idle": 80, "turn": 0, "move": 0 },
+  "eventsRefreshSec": { "balance": 1800 }
+}
+```
+
+规则（与主宠物**严格隔离**，绝不混用）：
+- **素材只查自己的**：素材目录名 = 文件名前缀（`pet/pig-config.json` → `pet/pig-animation/`），该种类所有实例共用；动画 URL `/thumb/<前缀>/<名>.webm`，查不到即 404——绝不落到 `main-animation` 或包内素材
+- **动画池不回落全局**：`animations` / `animationWeights` 必须写全（缺失即配置错误）
+- 与主配置同构的约束：`pets` 每只字段完整合法、数组内 id 唯一、`animations` / `animationWeights` 结构校验同一套规则；`notificationsEnabled` / `eventsRefreshSec` 是全局属性，不归宠物文件管（写了忽略、不写不报错）
+- 配置非法 / 缺少 `-animation/` 目录 / 实例 id 与主宠物冲突 → 加载时显式报错并跳过（不影响其他宠物）
+- 设置页不列出文件宠物（改文件即生效，刷新可见；保存/恢复默认不会把它们写进 `main-config.json`）
+- 余额档位动画按各宠物自己的 `events.balance`
+
 ## 运行效果
 
 宠物实际运行在 DSH Web 界面中的样子：

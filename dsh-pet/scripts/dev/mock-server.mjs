@@ -2,11 +2,12 @@
  * dev/mock-server.mjs —— 桌面模式运行时验证用 mock DSH 宿主（开发自测工具，不入 npm 包）。
  *
  * 模拟 /dsh-pet-7340 前缀的宿主端点（与浏览器 overlay 共用同一套契约）：
- *   GET  /dsh-pet-7340/config.jsonc  插件包真实配置
- *   GET  /dsh-pet-7340/config        用户覆盖层（空对象 = 回落默认）
- *   GET  /dsh-pet-7340/thumb/<name>.webm  从 assets/webm 读素材
- *   GET  /dsh-pet-7340/balance       模拟 DeepSeek 余额（固定 11.06 元）
- *   GET  /dsh-pet-7340/balance/trigger  触发计数（恒 0，验证轮询基线）
+ *   GET  /dsh-pet-7340/config.jsonc          插件包真实配置
+ *   GET  /dsh-pet-7340/config                用户覆盖层（空对象 = 回落默认）
+ *   GET  /dsh-pet-7340/thumb/<petId>/<name>.webm  从 assets/webm 读素材（petId 段剥掉，统一素材根）
+ *   GET  /dsh-pet-7340/extra-pets            额外宠物（mock 返回空列表：开发环境不模拟 pet pack）
+ *   GET  /dsh-pet-7340/balance               模拟 DeepSeek 余额（固定 11.06 元）
+ *   GET  /dsh-pet-7340/balance/trigger       触发计数（恒 0，验证轮询基线）
  *
  * 系统通知是浏览器半侧（notify.ts）的独立能力，走 DSH 网页自身事件流，与桌面模式/mock 无关。
  *
@@ -75,8 +76,24 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // 额外宠物：mock 环境不模拟 pet pack（真实宿主会扫描用户 pet/ 目录）
+  if (pathname === '/dsh-pet-7340/extra-pets') {
+    sendJson(res, 200, { pets: [] });
+    return;
+  }
+
+  // 动画文件：/dsh-pet-7340/thumb/<petId>/<name>.webm（与宿主路由同一形态）。
+  // petId 仅作归属标识：mock 服务器从统一素材根读（开发环境不模拟独立素材目录）；
+  // 剥掉 petId 段后按文件名解析，目标仍在 WEBM_ROOT 内才放行。
   if (pathname.startsWith('/dsh-pet-7340/thumb/')) {
-    const rel = pathname.slice('/dsh-pet-7340/thumb/'.length);
+    let rel = pathname.slice('/dsh-pet-7340/thumb/'.length);
+    const slash = rel.indexOf('/');
+    rel = slash >= 0 ? rel.slice(slash + 1) : rel;
+    if (!rel || rel.length === 0) {
+      res.writeHead(400);
+      res.end('bad path');
+      return;
+    }
     const candidate = normalize(join(WEBM_ROOT, rel));
     const rootWithSep = WEBM_ROOT.endsWith(sep) ? WEBM_ROOT : WEBM_ROOT + sep;
     if (candidate !== WEBM_ROOT && !candidate.startsWith(rootWithSep)) {

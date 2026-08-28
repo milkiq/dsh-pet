@@ -34,7 +34,7 @@ Besides the browser overlay, the plugin automatically spawns a **standalone tran
 - Same pet features on both sides, always: multiple pets on screen, corner + margin placement, the same animation chain / click / drag / balance tier animations with the rich balance bubble. (System notifications are a standalone capability — the browser half's `notify.ts` monitors DSH events and toasts; it is independent of the pet itself and therefore not copied to the desktop pet)
 - **On/off = the required per-pet `display` field**: `web` = browser only / `desktop` = desktop only / `both` = both / `none` = neither; the desktop window renders **all** pets with `display ∈ {desktop, both}`, each using its own size/corner config
 - Requires Electron (auto-detected, auto-downloaded to `~/.dsh/electron/` as a fallback; if missing, it only logs a warning and the browser overlay keeps working)
-- Same animation assets as the browser (`/dsh-pet-7340/thumb/<name>.webm`, user `main-animation/` takes precedence); config failures **fail loudly** (red error bar + 5s auto-retry), never a silent fallback
+- Same animation assets as the browser (`/dsh-pet-7340/thumb/<prefix>/<name>.webm`: `main` uses the user `main-animation/` dir first, then bundled assets; extra pets only use their own `pet/<prefix>-animation/`, shared by all instances of a species); config failures **fail loudly** (red error bar + 5s auto-retry), never a silent fallback
 
 ## ✨ Features
 
