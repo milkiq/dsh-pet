@@ -13,8 +13,8 @@
   // balanceEnabled（是否启用余额功能：true=触发余额动画+显示余额气泡；false=该宠物完全禁用。
   //   必填布尔值，缺失即配置错误）、display（显示位置，必填四值之一：
   //   web=仅浏览器 overlay / desktop=仅桌面模式（Electron 透明窗）/ both=两者/ none=都不显示。
-  //   缺失/非法即配置错误——代码不做兜底默认；桌面模式取 display 含 desktop 的第一只宠物，
-  //   其余 desktop/both 宠物暂不参与桌面窗口）、
+  //   缺失/非法即配置错误——代码不做兜底默认；桌面模式渲染 display 含 desktop/both 的全部宠物，
+  //   每只一个局部小窗）、
   // position（corner: 四角之一；marginX/marginY: 距所属角落偏移 px）
   "pets": [
     {

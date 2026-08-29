@@ -49,11 +49,10 @@ import type { jsx } from 'react/jsx-runtime';
 /** 运行时配置（PetMulti 加载后赋值；PetCard 只读） */
 let config: ClientConfig = EMPTY_CONF;
 
-/** 播放动画扩展名：发布期注入，不做运行时判断。
- *  源码里是占位符 __PET_EXT__；prepack 链的 scripts/prepare.js 在 bundle 之后
- *  把构建产物替换为 .webm（唯一发布/播放格式）。Safari/HEVC(.mov) 兼容属 fork
- *  定制（仓库保留流水线 scripts/encode_hevc_alpha.sh），插件本体不发布、不支持 .mov。 */
-const THUMB_EXT: string = '__PET_EXT__';
+/** 播放动画扩展名：唯一播放/发布格式 webm（VP9-alpha），源码写死、不做运行时判断。
+ *  Safari/HEVC(.mov) 兼容属 fork 定制（仓库保留流水线 scripts/encode_hevc_alpha.sh），
+ *  插件本体不发布、不支持 .mov。 */
+const THUMB_EXT = '.webm';
 
 /** 余额气泡展示时长（ms）：定时自动消失，与动画生命周期解耦 */
 const BUBBLE_DURATION_MS = 10 * 1000;

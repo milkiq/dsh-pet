@@ -11,29 +11,47 @@
   <img alt="assets" src="https://img.shields.io/badge/assets-dynamic%20animations-ff69b4">
 </p>
 
-> A floating desktop pet for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web UI.
-> 一只住在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面里的桌面宠物：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽。
+> A floating desktop pet for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web UI: idle breathing, random actions (the 97 hand-drawn transparent animations — dozing off, playing with a Rubik's cube, writing code, hotpot…), turns, screen wandering, squash-and-stretch click reactions, throw-and-bounce drag physics, a right-click menu to play any action on demand, balance animations with a thinking bubble — spawn as many pets as you want, live on your **desktop** (transparent always-on-top window), or add **brand-new pet species** (pet pack).
+> 一只住在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里的桌面宠物：待机呼吸、随机动作（打瞌睡、玩魔方、写代码、吃火锅……97 个手绘风透明动画随时无缝衔接）、左右转向、屏幕漫游、点击 Q 弹、拖拽甩抛反弹、右键菜单点播动作、余额动画 + 头顶联想气泡——可多开同屏，能脱离浏览器住上**桌面**（透明置顶小窗），也能自己添加**全新宠物种类**（pet pack）。
 
 ---
 
 ## 🚀 快速开始（安装插件）
 
 ```sh
-dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-alpha）
+dsh plugin --profile web add dsh-pet
 ```
 
-重启 `dsh web`，宠物出现在界面右下角——全部透明动画开箱即用，无需任何生成流程。
+重启 `dsh web`，宠物出现在界面右上角（默认配置角落，可在设置页修改）——全部透明动画开箱即用，无需任何生成流程。
 
-> 💡 单一格式（发布期注入，无运行时浏览器判断）：只内置 `.webm`（VP9-alpha），浏览器 Chrome/Edge/Firefox 与桌面模式（Electron=Chromium）共用。Safari 不认 webm alpha（黑底）；需要 Safari/HEVC 兼容请 fork 仓库启用保留的流水线（`scripts/encode_hevc_alpha.sh` + `hevc-alpha.yml`）并自行在宿主路由加回 `.mov` 分支（`src/host/index.ts` 的 thumb 路由），插件本体不发布、不支持 `.mov`。
+> 💡 单一格式（无运行时浏览器判断，源码写死 `.webm`）：只内置 `.webm`（VP9-alpha），浏览器 Chrome/Edge/Firefox 与桌面模式（Electron=Chromium）共用。Safari 不认 webm alpha（黑底）；需要 Safari/HEVC 兼容请 fork 仓库启用保留的流水线（`scripts/encode_hevc_alpha.sh` + `hevc-alpha.yml`）并自行在宿主路由加回 `.mov` 分支（`src/host/index.ts` 的 thumb 路由），插件本体不发布、不支持 `.mov`。
 
 > 💡 想自己造一只专属宠物？克隆 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 仓库，用内置素材链（AI 提示词 → 绿幕视频 → 透明动画，素材由豆包生成）从零生成，全流程可复现。
+
+## ✨ 功能特性
+
+- **纯粹的桌宠**：不掺业务功能——没有天气查询、系统监控、Agent 状态感知，就一件事：陪你（外加可选的余额展示与系统通知，见配置节）。零核心改动、零模型成本（运行时零 LLM/API 调用）
+- **手绘风透明动画**：待机呼吸、打瞌睡、玩魔方、哼歌、炸毛、吐泡泡、玩水枪、小提琴演奏、蓝鲸现世、吃白饭、照镜子、三支舞、写代码、四季动作（放风筝、堆雪人、吃冰淇淋、放烟花……）全部无缝衔接
+- **永不停止的动画链**：每段动画播完立即按权重选下一个（默认 idle 10 / turn 5 / move 5，剩余 80% 归随机动作分类）
+- **屏幕漫游**：朝 facing 方向行走，自动检查空间、不走出屏幕
+- **点击 / 拖拽（弹簧跟手 + 甩抛反弹 + Q 弹）**：点击有随机回应动画（开心 / 害羞 / 傲娇）并「**Q 弹**」挤压回弹（垂直压扁 55% → easeOutBack 回弹过冲，贴地锚定）；拖拽为**过阻尼弹簧跟手**（不抖不飘、无 overshoot）；松手按最后轨迹估速（停顿/慢速 = 温柔放下原地停住）——**用力甩出即沿抛物线飞行：撞屏幕边缘按恢复系数反弹、落地摩擦减速至停，每次落地按冲击速度 Q 弹（轻落 0.8 ~ 重砸 0.55）**；物理与挤压曲线纯函数在 `src/shared/physics.ts`，浏览器与桌面严格同一手感（`prefers-reduced-motion` 时跳过挤压）
+- **右键级联菜单**：右键宠物弹出（桌面与浏览器共用同一份组件，`src/shared/menu.ts`）——桌面端根项「**打开网站** / **查看余额** / **回到初始位置** + **动作**」、浏览器端「**回到初始位置** + **动作**」；「打开网站」用**系统默认浏览器**打开 DSH 网站（等效网页里 Ctrl+点击链接）；「查看余额」立即拉余额弹气泡播档位动画（与周期触发同一展示路径）；「回到初始位置」停漫游回配置角落；**动作 → 分类 → 具体动画**（分类 = 待机/转向/拖拽/点击回应/移动/随机动作分类/余额档位；noMirror 文字类朝右时自动强制朝左）——浏览器端只在宠物命中区拦截右键（`preventDefault`），完全不进入/改动 DSH 页面自己的菜单
+- **左右朝向**：所有动画 CSS 镜像，人物可朝左 / 朝右
+- **落地对齐**：动画统一脚底线，宠物始终站在"地面"上
+- **流畅切换**：双缓冲 video 交叉淡入，切换零空白帧
+- **无障碍友好**：支持 `prefers-reduced-motion`
+- **多开**：可配置多个宠物同屏，每只独立的 id/大小/位置/余额开关/显示位置（设置页「桌宠配置」添加/删除）
+- **桌面模式（可选）**：可脱离浏览器住上桌面——透明置顶局部小窗，与浏览器严格同行为（见下节）
+- **余额展示**：实时显示余额/额度，按档位播动画 + 头顶联想气泡，每只宠物可独立开关
+- **额外宠物种类（pet pack）**：在 `pet/` 自建「种类」（独立动画池 + 自己的素材），多实例共享，与主宠物严格隔离（见配置节）
+- **自定义动画**：`main-animation/webm/` 放 VP9-Alpha `.webm` 即作为新动画，优先于包内素材
 
 ## 🪟 桌面模式（脱离浏览器，可选）
 
 默认情况下宠物住在 DSH 网页里（浏览器 overlay）。安装后还会**自动拉起一个脱离浏览器的桌面形态**：
 
 - **独立透明置顶窗口**：为**每只桌面宠物**各开一个**局部小窗口**（尺寸 = 宠物包围盒 + 四周外扩余量，为气泡/弹窗预留空间；透明、置顶、跳过任务栏），窗口跟随宠物移动；窗口**永不铺满屏幕**（全屏透明分层窗会触发 Windows DWM 视频合成黑屏，实测小窗不黑）。与浏览器一致，只有宠物**身体命中区**可交互，窗口内其余透明像素与窗口外一律**点击穿透**到下层应用（`setIgnoreMouseEvents` + 悬停命中翻转）
-- **与浏览器严格同行为**（同一份源码两个外壳）：宠物功能/文案完全对齐——多开宠物同屏显示、角落+边距定位、同一动画链/点击/拖拽/余额档位动画与富余额气泡；**页面配置的显示位置由 `display` 字段决定，两端宠物内容只可能一致，不会出现"一个有另一个没有"**。系统通知是独立于宠物的能力（见下），不在此列
+- **与浏览器严格同行为**（同一份源码两个外壳）：宠物功能/文案完全对齐——多开宠物同屏显示、角落+边距定位、同一动画链/点击/拖拽/余额档位动画与富余额气泡；**页面配置的显示位置由 `display` 字段决定，两端宠物内容只可能一致，不会出现"一个有另一个没有"**。系统通知是独立于宠物的能力（见配置节 `notificationsEnabled`），不在此列
 - **共享纯逻辑**：待机选择 / 移动几何 / 余额折算 / 配置校验 / 通知映射都在 `src/shared/`，浏览器 bundle 与桌面 `shared-core.js`（构建产物，`window.PetShared`）共用同一份源码，只有最外层的渲染壳不同（React vs 纯 DOM）
 
 ### 桌面模式怎么装 / 关
@@ -45,25 +63,13 @@ dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-
   - 在 DSH 设置页「桌宠配置」编辑，保存即时生效；`display` 缺失/非法即配置错误，**代码不做兜底**
 - 桌面与浏览器是**同一套动画素材**（`/dsh-pet-7340/thumb/<前缀>/<name>.webm`：main 用用户 `main-animation/` 目录优先 + 包内素材；额外宠物只查自己的 `pet/<前缀>-animation/`，同种类多实例共享）；配置加载失败会**大声报错**（红色错误条 + 每 5 秒自动重试），绝不静默兜底
 
-## ✨ 功能特性
-
-- **纯粹的桌宠**：不掺业务功能——没有天气查询、系统监控、Agent 状态感知，就一件事：陪你。零核心改动、零模型成本（运行时零 LLM/API 调用）
-- **手绘风透明动画**：待机呼吸、打瞌睡、玩魔方、哼歌、炸毛、吐泡泡、玩水枪、小提琴演奏、蓝鲸现世、吃白饭、照镜子、三支舞、写代码、四季动作（放风筝、堆雪人、吃冰淇淋、放烟花……）全部无缝衔接
-- **永不停止的动画链**：每段动画播完立即按概率选下一个（30% 待机 / 10% 转向 / 40% 动作 / 20% 移动）
-- **屏幕漫游**：朝 facing 方向行走，自动检查空间、不走出屏幕
-- **点击 / 拖拽（弹簧跟手 + 甩抛反弹 + Q 弹）**：点击有随机回应动画（开心 / 害羞 / 傲娇）并「**Q 弹**」挤压回弹（垂直压扁 55% → easeOutBack 回弹过冲，贴地锚定）；拖拽为**过阻尼弹簧跟手**（不抖不飘、无 overshoot）；松手按最后轨迹估速（停顿/慢速 = 温柔放下原地停住）——**用力甩出即沿抛物线飞行：撞屏幕边缘按恢复系数反弹、落地摩擦减速至停，每次落地按冲击速度 Q 弹（轻落 0.8 ~ 重砸 0.55）**；物理与挤压曲线纯函数在 `src/shared/physics.ts`，浏览器与桌面严格同一手感（`prefers-reduced-motion` 时跳过挤压）
-- **右键级联菜单**：右键宠物弹出（桌面与浏览器共用同一份组件，`src/shared/menu.ts`）——桌面端根项「**打开网站** / **查看余额** / **回到初始位置** + **动作**」、浏览器端「**回到初始位置** + **动作**」；「打开网站」用**系统默认浏览器**打开 DSH 网站（等效网页里 Ctrl+点击链接）；「查看余额」立即拉余额弹气泡播档位动画（与周期触发同一展示路径）；「回到初始位置」停漫游回配置角落；**动作 → 分类 → 具体动画**（分类 = 待机/转向/拖拽/点击回应/移动/随机动作分类/余额档位；noMirror 文字类朝右时自动强制朝左）——浏览器端只在宠物命中区拦截右键（`preventDefault`），完全不进入/改动 DSH 页面自己的菜单
-- **左右朝向**：所有动画 CSS 镜像，人物可朝左 / 朝右
-- **落地对齐**：动画统一脚底线，宠物始终站在"地面"上
-- **流畅切换**：双缓冲 video 交叉淡入，切换零空白帧
-- **无障碍友好**：支持 `prefers-reduced-motion`
-
 ## ⚙️ 配置
 
 | 配置项                 | 说明                                                                                                                                                                                                                                                                                 |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 设置页「桌宠配置」     | DSH 设置 → 桌宠配置：图形化编辑**大小 / 位置 / 边距**，支持**多开**（添加/删除宠物，每只独立配置）；保存**即时生效**，恢复默认回落 config.jsonc                                                                                                                                      |
 | `pets`（config.jsonc） | 默认宠物列表：`[{ "id", "size", "balanceEnabled", "display", "position": { "corner", "marginX", "marginY" } }]`；`display` 为 web/desktop/both/none（必填，缺失即配置错误）；多只即多开，`display` 含 desktop 的宠物出现在桌面窗口（与浏览器同屏渲染），首只为「添加宠物」的默认模板 |
+| `notificationsEnabled` | 系统通知总开关（布尔，默认开）：对话完成 / 生成失败 / 输出截断 / 权限申请 / 用户选择，在窗口失焦时弹系统级通知（桌面右下角）                                                                                                                                                         |
 
 > 说明：插件安装即用，配置均为可选；设置页保存的用户覆盖写入 `$DSH_HOME/dsh-pet/main-config.json`（用户层，优先于包内默认）。
 
@@ -89,7 +95,7 @@ dsh plugin --profile web add dsh-pet          # 唯一发布格式：webm（VP9-
 
 ```
 $DSH_HOME/dsh-pet/pet/
-├─ pig-config.json        ← 额外宠物 pig 的配置（命名词干 = 宠物 id）
+├─ pig-config.json        ← 额外宠物 pig 的配置（命名词干 = 种类名，实例 id 任意）
 └─ pig-animation/         ← pig 自己的动画素材（直接平铺 .webm，仿 main-animation）
    ├─ 待机.webm
    └─ 打滚.webm
@@ -105,26 +111,38 @@ $DSH_HOME/dsh-pet/pet/
   "notificationsEnabled": true,
   "pets": [
     {
-      "id": "pig1",                            // 实例 id（可多只；不必等于文件名前缀）
+      "id": "pig1", // 实例 id（可多只；不必等于文件名前缀）
       "size": 420,
       "balanceEnabled": true,
-      "display": "both",                        // web / desktop / both / none
-      "position": { "corner": "top-right", "marginX": 24, "marginY": 100 }
+      "display": "both", // web / desktop / both / none
+      "position": { "corner": "top-right", "marginX": 24, "marginY": 100 },
     },
-    { "id": "pig2", "size": 360, "balanceEnabled": false, "display": "web", "position": { "corner": "top-left", "marginX": 24, "marginY": 100 } }
+    {
+      "id": "pig2",
+      "size": 360,
+      "balanceEnabled": false,
+      "display": "web",
+      "position": { "corner": "top-left", "marginX": 24, "marginY": 100 },
+    },
   ],
   "animations": {
-    "idle": ["待机"], "turn": [], "drag": [], "clicks": ["打滚"],
+    "idle": ["待机"],
+    "turn": [],
+    "drag": [],
+    "clicks": ["打滚"],
     "moves": { "default": { "minDist": 80, "maxDist": 360, "margin": 20, "leadSec": 2, "tailSec": 2 }, "actions": [] },
     "categories": [],
-    "events": { "balance": ["余额-钱袋满溢", "余额-金袋叮当", "余额-钱袋如常", "余额-数金皱眉", "余额-袋空如洗", "余额-分文不剩"] }
+    "events": {
+      "balance": ["余额-钱袋满溢", "余额-金袋叮当", "余额-钱袋如常", "余额-数金皱眉", "余额-袋空如洗", "余额-分文不剩"],
+    },
   },
   "animationWeights": { "idle": 80, "turn": 0, "move": 0 },
-  "eventsRefreshSec": { "balance": 1800 }
+  "eventsRefreshSec": { "balance": 1800 },
 }
 ```
 
 规则（与主宠物严格隔离，绝不混用）：
+
 - **素材只查自己的**：素材目录名 = 文件名前缀（`pet/pig-config.json` → `pet/pig-animation/`），该种类所有实例共用；动画 URL 为 `/thumb/<前缀>/<名>.webm`，查不到即 404 报错——**绝不落到 `main-animation` 或包内素材**
 - **动画池不回落全局**：`animations` / `animationWeights` 是该种类的（结构校验与主配置同一套规则）
 - `pets` 数组非空、每只字段（id/size/balanceEnabled/display/position）完整合法、数组内 id 唯一——**id 随意写、数量随意**，与主配置完全一致
@@ -146,6 +164,8 @@ dsh plugin --profile web remove dsh-pet
 <p>
   <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/assets/screenshots/dsh-pet-running-1.png" width="380" alt="dsh-pet running in DSH Web UI 1" title="dsh-pet running in DSH Web UI 1">
   <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/assets/screenshots/dsh-pet-running-2.png" width="380" alt="dsh-pet running in DSH Web UI 2" title="dsh-pet running in DSH Web UI 2">
+  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/assets/screenshots/dsh-pet-running-7.png" width="380" alt="dsh-pet running in DSH Web UI 7" title="dsh-pet running in DSH Web UI 7">
+  <img src="https://raw.githubusercontent.com/PC2005-cloud/dsh-pet/main/assets/screenshots/dsh-pet-running-8.png" width="380" alt="dsh-pet running in DSH Web UI 8" title="dsh-pet running in DSH Web UI 8">
 </p>
 
 ## 🎬 效果预览

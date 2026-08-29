@@ -152,11 +152,9 @@ app.whenReady().then(() => {
   ipcMain.on('pet:open-site', (event, payload) => {
     const url = payload && typeof payload === 'object' ? String(payload.url || '') : '';
     if (!/^https?:[/][/]/.test(url)) return;
-    shell
-      .openExternal(url)
-      .catch((error) => {
-        console.error('[dsh-pet-desktop-helper] openExternal failed:', error);
-      });
+    shell.openExternal(url).catch((error) => {
+      console.error('[dsh-pet-desktop-helper] openExternal failed:', error);
+    });
   });
 
   // 冒烟自检模式（默认关闭）：DSH_PET_SMOKE=1 时延时截图到 DSH_PET_SMOKE_OUT 后退出，

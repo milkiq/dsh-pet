@@ -1,23 +1,22 @@
 #!/usr/bin/env node
 /**
- * prepare.js —— 发布前微调（构建 + 注入播放格式）
+ * prepare.js —— 发布前微调（构建完整产物 + 收敛 files）
  *
- * 插件默认且只发布**单一 webm 格式**（VP9-alpha）：浏览器 overlay 的
- * Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用同一格式。
- * Safari/HEVC(mov) 兼容由仓库保留的流水线（scripts/encode_hevc_alpha.sh +
- * hevc_alpha_encoder.swift + .github/workflows/hevc-alpha.yml）支持——
- * 需要兼容 Safari 者 fork 仓库后自行启用，不参与本插件的发布流程。
+ * 插件只发布**单一 webm 格式**（VP9-alpha）：浏览器 overlay 的
+ * Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用同一格式
+ * （源码写死 .webm，无发布期注入）。Safari/HEVC(mov) 兼容由仓库保留的
+ * 流水线（scripts/encode_hevc_alpha.sh + hevc_alpha_encoder.swift +
+ * .github/workflows/hevc-alpha.yml）支持——需要兼容 Safari 者 fork
+ * 仓库后自行启用，不参与本插件的发布流程。
  *
  * 做什么：
  *   1. 构建（npm run bundle：tsdown 把 src/ → lib/）
  *   1.5 构建桌面共享核心（npm run build:desktop-core：src/shared → window.PetShared）
  *   1.6 生成类型声明（npm run types：tsc → lib/types/*.d.ts）
- *   2. 注入：把 lib/client.js 中的占位符 __PET_EXT__ 替换为 .webm
- *      （src/client/pet.ts 里 THUMB_EXT 是占位符，不做运行时浏览器判断）
- *   3. 改写 package.json：files 收敛为发布清单（含桌面模式运行时 runtime/electron-helper）
+ *   2. 改写 package.json：files 收敛为发布清单（含桌面模式运行时 runtime/electron-helper）
  *      —— 幂等：跑一次即定格为当前状态，再跑结果不变，无需备份/恢复
  *
- * 用法：node scripts/prepare.js（npm run prepare:webm）
+ * 用法：node scripts/prepare.js（npm run prepare；npm install / npm publish 自动执行）
  * 发布：npm publish --tag latest
  */
 import { spawnSync } from 'node:child_process';
@@ -26,7 +25,6 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const CLIENT = join(ROOT, 'lib', 'client.js');
 const PKG = join(ROOT, 'package.json');
 
 // 1. 构建 src → lib
@@ -58,24 +56,7 @@ if (buildTypes.status !== 0) {
   process.exit(1);
 }
 
-// 2. 注入扩展名（单一 .webm）
-const ext = '.webm';
-let src;
-try {
-  src = readFileSync(CLIENT, 'utf8');
-} catch {
-  console.error(`[prepare] 找不到 ${CLIENT} —— 构建失败?`);
-  process.exit(1);
-}
-const marker = '__PET_EXT__';
-if (!src.includes(marker)) {
-  console.error(`[prepare] ${CLIENT} 中未找到占位符 ${marker} —— 产物已被注入或未重新构建，请先 npm run bundle`);
-  process.exit(1);
-}
-writeFileSync(CLIENT, src.split(marker).join(ext), 'utf8');
-console.log(`[prepare] ✓ lib/client.js THUMB_EXT → "${ext}"`);
-
-// 3. 改写 package.json：files 收敛为发布清单（幂等，无备份）
+// 2. 改写 package.json：files 收敛为发布清单（幂等，无备份）
 const pkg = JSON.parse(readFileSync(PKG, 'utf8'));
 const keep = [
   'lib',

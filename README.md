@@ -13,7 +13,7 @@
   <img alt="assets" src="https://img.shields.io/badge/assets-dynamic%20animations-ff69b4">
 </p>
 
-一只住在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 界面里的桌面宠物：待机呼吸、随机动作（含打瞌睡）、偶尔转向、屏幕漫游、点击反应、可拖拽——还能实时展示 LLM 服务商的余额/额度（余额动画 + 头顶联想气泡）。
+一只住在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里的桌面宠物：待机呼吸、随机动作（打瞌睡、玩魔方、写代码、吃火锅……97 个手绘风透明动画随时无缝衔接）、左右转向、屏幕漫游、点击 Q 弹、拖拽甩抛反弹、右键菜单点播动作、余额动画 + 头顶联想气泡——可多开同屏，能脱离浏览器住上**桌面**（透明置顶小窗），也能自己添加**全新宠物种类**（pet pack）。
 
 这不是一个普通插件，而是**完整的三件套项目**：
 
@@ -42,7 +42,7 @@ dsh --version   # 验证 dsh 命令可用
 dsh plugin --profile web add dsh-pet
 ```
 
-重启 `dsh web`，宠物出现在右下角。
+重启 `dsh web`，宠物出现在界面右上角（默认配置角落，可在设置页修改）。
 
 > **兼容性**：本插件在 dsh **`0.1.1-rc.2`** 下开发并测试（`dsh --version` 可查看你的版本）。建议使用相同版本；其他版本如遇问题欢迎反馈。
 
@@ -58,132 +58,18 @@ cd dsh-pet/dsh-pet
 # ② 安装依赖
 npm install
 
-# ③ 构建 + 注入播放格式（webm，唯一发布格式）
-npm run prepare:webm
+# ③ 构建（tsdown → lib）
+npm run prepare     # 构建完整 lib（npm install / npm publish 时会自动执行）
 
 # ④ 安装到 DSH（file: 指向本目录，用构建好的 lib）
 dsh plugin --profile web add file:D:/path/to/dsh-pet
 ```
 
-> 注：`prepare:webm` 才产出可安装的 lib（注入播放扩展名 `.webm`）；直接用 `tsdown` 裸构建会留下占位符，动画无法播放。
-
-## 🪟 桌面模式（可选，脱离浏览器）
-
-插件内建**双模式**：安装后默认会拉起**独立透明置顶窗口**——为每只桌面宠物各开一个**局部小窗口**（尺寸 = 宠物包围盒 + 四周外扩余量，为气泡/弹窗预留空间，跟随宠物移动；**永不铺满屏幕**：全屏透明分层窗会触发 Windows DWM 视频合成黑屏）。与浏览器 overlay **严格同行为**——同一份纯逻辑源码（`dsh-pet/src/shared/`），两端的功能/动画/文案/配置完全对齐，不会出现"一个有另一个没有"：
-
-- **依赖**：首次启动自动探测 Electron（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到时自动下载到 `~/.dsh/electron/`（可 `cd dsh-pet && npm run ensure:electron` 手动触发）；缺失时仅日志告警，不影响浏览器形态
-- **开关 = 每只宠物的必填字段 `display`**（四个值）：`web` = 仅浏览器 / `desktop` = 仅桌面 / `both` = 两者 / `none` = 都不显示；桌面模式渲染 display 含 desktop 的**全部**宠物（多开同屏，与浏览器一致）。在 DSH 设置页「桌宠配置」编辑，保存即时生效；缺失即配置错误，代码不做兜底
-- **实现**：浏览器 bundle 与桌面 `shared-core.js`（`src/shared` 的 iife 构建产物，`window.PetShared`）共用同一份纯逻辑；桌面端 `dsh-pet/runtime/electron-helper/` 只是薄壳（Electron 窗口 + 纯 DOM 渲染），行为差异为零
-- 本地调试：`cd dsh-pet && npm run start:desktop -- http://127.0.0.1:3080/dsh-pet-7340/config.jsonc`
-
-## 从零生成你自己的宠物（完整流程）
-
-### ① 提示词 → 源视频
-
-用 AI 视频生成工具（如可灵、Runway、豆包等，本项目素材即由豆包生成），按 `prompts/桌面宠物 10 秒动作提示词.md` 的配方，一个动作生成一段 10 秒绿幕视频：
-
-- 视频比例 16:9，背景纯绿幕（#00FF00）
-- 人物位置/大小固定（头顶 ~20% 高度、脚底 ~85% 高度）
-- 动作全程在画幅内，首尾帧为标准正面站立
-- 每段动画按秒分解（0-10s 各阶段动作）
-
-生成结果按动作各存一个 mp4，放入 `video/`。
-
-> **源视频获取**：为控制仓库体积，`video/` 源视频不入 git。Releases 提供**打包压缩包**，浏览器直接下载即可：
->
-> - `assets-videos.zip` —— 全部源视频压缩包（中文名 mp4，解压后放入 `video/`）
->
-> 解压：`Expand-Archive assets-videos.zip`（Windows）或 `unzip assets-videos.zip`，把 mp4 放回 `video/` 即可运行素材链。
-
-### ② 源视频 → 透明动画（素材链）
-
-step02（透明视频）有**两条路线，按需二选一**（默认自动、人人可复现；效果不佳可用 PR 手工抠像覆盖）：
-
-```sh
-cd scripts
-# 路线 A（默认）：自动绿幕抠像（HSV 色相，无需人工）
-python watermark_step01.py   # 水印遮罩填充 → step01/
-python chroma_step02.py      # 绿幕抠像转透明 → step02/
-
-# 路线 B（可选）：PR 手工抠像覆盖（针对含第三方物品/自动抠像效果不佳的动作）
-#   1. 在 PR 里手工抠像，导出带 alpha 的透明 .mov（如 ProRes 4444 with Alpha）
-#   2. 放入 pr/，文件名与动作名一致（如 吃白饭.mov）
-python pr_import_step02.py   # pr/*.mov → step02/（透明 webm，覆盖该动作自动抠像结果）
-
-# 后续步骤两条路线共用：
-python normalize_step03.py   # 归一化 2160×1215 统一站立居中 → step03/
-python encode_thumbs.py      # 转码 640×360 播放变体 → step04/
-```
-
-**依赖**：Python 3 + ffmpeg + numpy + scipy（素材链脚本自动用工作区 `.tools/` 下的 ffmpeg）。
-
-> **本项目全部采用路线 B**（97 个动作均为 PR 手工抠像）：对"含第三方物品/透明边缘复杂"的动作，自动 HSV 抠像易残边或误抠，PR 手动遮罩更精细。两条路线产出同一级 `step02/`，后续步骤完全一致；`chroma_step02.py` 保留为自动化兜底，任何动作仍可一键自动生成。
-
-### ②.5 🍎 Safari/HEVC 兼容流水线（保留，不参与发布，fork 定制用）
-
-插件自 0.3 起**只发布单一 webm 格式**（VP9-alpha）：浏览器 overlay 的 Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用，无需第二套素材；**宿主端 thumb 路由也已移除 `.mov` 分支**（`dsh-pet/src/host/index.ts`）。Safari 不认 webm alpha（渲染黑底）、只支持 **HEVC-with-Alpha mov**（编码器 `hevcWithAlpha` 仅 macOS 有），需要 Safari 兼容者可 **fork 仓库自行启用**保留的流水线并自行加回 `.mov` 路由：
-
-- workflow：`.github/workflows/hevc-alpha.yml`（手动触发 `workflow_dispatch`，macOS runner 云端批量转码）
-- 编码脚本：`scripts/encode_hevc_alpha.sh`（ffmpeg 解码 webm → BGRA 帧管线 → Swift `hevc_alpha_encoder.swift` 走 AVAssetWriter `hevcWithAlpha` 原生 API）+ `scripts/check_alpha.py`（产物校验）
-- 输入：`dsh-pet/assets/webm/*.webm`；输出写回 `dsh-pet/assets/mov/`（流水线输出目录，不入库不发布）；产物 `hvc1` tag + alpha 校验后打包为 artifact
-- 启用方式：自行把 mov 素材同步进包并恢复双格式支持（`prepare.js` 已收敛为 webm、宿主 thumb 路由已移除 `.mov`，源码历史里都有 mov 分支可参考）
-
-### ③ 动画 → 插件
-
-```sh
-# 把 step04 的播放变体同步进插件包（webm 直接 cp）
-cp step04/*.webm dsh-pet/assets/webm/   # 播放格式（VP9-alpha）
-
-# 本地安装插件
-dsh plugin --profile web add file:D:/path/to/dsh-pet
-```
-
-> 中间产物（step01-04）由脚本生成、不入仓库；`video/` 源视频和脚本是成果、入库维护。
-
-### 🎯 发布（单一 webm 格式）
-
-插件只发布一个 npm 包、一个格式（webm），`files` 恒定只带 `assets/webm`（浏览器与桌面模式共用，包体最小）：
-
-```sh
-cd dsh-pet
-npm run prepare:webm   # 构建 + 注入 .webm → 收敛 files 清单（含桌面运行时）
-npm publish --tag latest
-```
-
-- client 端不做运行时浏览器判断——扩展名由发布期脚本注入（`prepare:webm` → `.webm`）
-- 需要 Safari/HEVC 版：见上方 ②.5，fork 仓库后启用保留的流水线自行定制
-
-### 项目结构
-
-```
-├── prompts/                 # ① 各动作的生成提示词（绿幕规范 + 按秒分解）
-├── step01/                  # ② 素材链中间产物：绿幕原始帧（不入库）
-├── step02/                  # ② 素材链中间产物：抠像（不入库）
-├── step03/                  # ② 素材链中间产物：水印合成（不入库）
-├── step04/                  # ② 素材链中间产物：640×360 播放变体（不入库）
-├── scripts/                 # ② 素材生成链（Python：水印/抠像/归一化/转码）
-├── video/                   # ② 源视频（绿幕 mp4 + 水印 mask，一动作一文件；不入库，Releases 有压缩包）
-├── pr/                      # ② 路线 B 输入：PR 导出的透明 .mov（本地工作数据，不入库）
-├── prproj/                  # ② PR 工程目录（.prproj + 遮罩缓存 + 自动保存，本地不入库）
-├── tools/                   # 开发工具：preview.html（素材链各阶段效果预览）
-├── .github/workflows/       # CI：hevc-alpha.yml（macOS runner 批量转码 webm → mov，手动触发）
-├── dsh-pet/                 # ③ 插件（可独立 npm 发布）
-│   ├── src/                 #   TS 源码（host 半侧 /dsh-pet-7340 路由 + client 半侧动画链）
-│   ├── lib/                 #   tsdown 构建产物（prepare 自动构建，lib/*.js 不入库）
-│   ├── assets/webm/         #   640×360 VP9-alpha 播放动画（Chrome/Edge/Firefox 版素材，唯一发布格式）
-│   ├── assets/preview/      #   GIF 预览（README 展示用，拼音命名）
-│   ├── assets/fonts/        #   气泡/通知字体
-│   ├── assets/pic/          #   通知图标 + 手套光标
-│   ├── assets/config.jsonc  #   默认配置（动画池 / 权重 / 宠物列表，单一事实来源）
-│   ├── scripts/prepack-check.js  # 发布前健康检查
-│   └── scripts/prepare.js   # 发布前微调（构建 + 注入播放格式 .webm）
-├── DESIGN.md                # 设计与实现文档
-└── LICENSE                  # MIT
-```
+> 注：`prepare`（npm install / npm publish 时自动执行，也可手动 `npm run prepare`）才产出**完整可安装**的 lib——除 tsdown 构建外还构建桌面共享核心（`shared-core.js`）、生成类型声明并收敛发布 `files` 清单；裸 `tsdown` 构建会缺桌面运行时与类型。
 
 ## 插件功能
 
-- **纯粹的桌宠**：核心就是陪你——没有天气查询、系统监控、Agent 状态感知等花活；唯一的"业务功能"是**可选的余额展示**（见下节）。零核心改动（不碰 DSH 内核）
+- **纯粹的桌宠**：核心就是陪你——没有天气查询、系统监控、Agent 状态感知等花活；除了**可选的余额展示**（见下节）与**系统通知**（对话完成 / 生成失败 / 输出截断 / 权限申请 / 用户选择，窗口失焦时弹系统级通知）外没有其他业务功能。零核心改动（不碰 DSH 内核）
 - **余额展示**：实时显示当前 LLM 服务商的余额/额度——DeepSeek 官方显示账户余额（¥），OpenCode Zen Go 显示 5h/周/月 三个额度窗口中最紧张的一个；每次刷新按档位播放余额动画，头顶弹出联想气泡（随宠物大小等比缩放，10 秒后自动消失）；每只宠物可独立开关（`balanceEnabled`）
 - **动画链**：每个动画（含待机）播完立即按权重选下一个（权重配置于 `config.jsonc`，默认 idle 10 / turn 5 / move 5 + 动作分类权重），首尾相接永不停止
 - **多开**：可配置同时显示多个宠物，每只宠物独立的大小与位置（设置页「桌宠配置」添加/删除）
@@ -193,6 +79,19 @@ npm publish --tag latest
 - **左右朝向**：所有动画可镜像，人物可朝左/朝右
 - **落地对齐**：动画统一脚底线，宠物始终站在地面上
 - **流畅切换**：双缓冲交叉淡入，切换无空白帧
+- **桌面模式（可选）**：可脱离浏览器，为每只桌面宠物开一个独立透明置顶局部小窗，与浏览器严格同行为、共用同一份素材与纯逻辑（见下节）
+- **额外宠物种类（pet pack）**：在 `$DSH_HOME/dsh-pet/pet/` 下建 `种类名-config.json` + `种类名-animation/`，即可添加拥有**独立动画池与素材**的全新种类，多实例共享素材（见「配置 → 方式四」）
+- **自定义动画**：往 `main-animation/webm/` 放入 VP9-Alpha 的 `.webm` 即可作为新动画，优先于包内素材
+- **无障碍**：支持 `prefers-reduced-motion`（减少动效时跳过 Q 弹挤压与淡入切换）
+
+## 🪟 桌面模式（可选，脱离浏览器）
+
+插件内建**双模式**：安装后默认会拉起**独立透明置顶窗口**——为每只桌面宠物各开一个**局部小窗口**（尺寸 = 宠物包围盒 + 四周外扩余量，为气泡/弹窗预留空间，跟随宠物移动；**永不铺满屏幕**：全屏透明分层窗会触发 Windows DWM 视频合成黑屏）。与浏览器 overlay **严格同行为**——同一份纯逻辑源码（`dsh-pet/src/shared/`），两端的功能/动画/文案/配置完全对齐，不会出现"一个有另一个没有"：
+
+- **依赖**：首次启动自动探测 Electron（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到时自动下载到 `~/.dsh/electron/`（可 `cd dsh-pet && npm run ensure:electron` 手动触发）；缺失时仅日志告警，不影响浏览器形态
+- **开关 = 每只宠物的必填字段 `display`**（四个值）：`web` = 仅浏览器 / `desktop` = 仅桌面 / `both` = 两者 / `none` = 都不显示；桌面模式渲染 display 含 desktop 的**全部**宠物（多开同屏，与浏览器一致）。在 DSH 设置页「桌宠配置」编辑，保存即时生效；缺失即配置错误，代码不做兜底
+- **实现**：浏览器 bundle 与桌面 `shared-core.js`（`src/shared` 的 iife 构建产物，`window.PetShared`）共用同一份纯逻辑；桌面端 `dsh-pet/runtime/electron-helper/` 只是薄壳（Electron 窗口 + 纯 DOM 渲染），行为差异为零
+- 本地调试：`cd dsh-pet && npm run start:desktop -- http://127.0.0.1:3080/dsh-pet-7340/config.jsonc`
 
 ## ⚙️ 余额展示（Balance）
 
@@ -207,7 +106,7 @@ npm publish --tag latest
 
 桌宠的大小、位置、多开均可配置，两条途径：
 
-> 💡 **两条途径只是编辑入口不同，最终都是同一份用户配置**——配置能力远不止设置页那几个选项：设置页只能改「大小/位置/多开」，但**手动编写配置文件可以任意自由配置**（动画池、播放权重、事件动画、刷新周期……），只要**格式与包内默认配置 `config.jsonc` 一致**即可，用户配置会**整体覆盖**对应字段的默认值。
+> 💡 **两条途径只是编辑入口不同，最终都是同一份用户配置**——配置能力远不止设置页那几个选项：设置页可改大小/位置/边距/显示位置/余额开关/多开，但**手动编写配置文件可以任意自由配置**（动画池、播放权重、事件动画、刷新周期……），只要**格式与包内默认配置 `config.jsonc` 一致**即可，用户配置会**整体覆盖**对应字段的默认值。
 
 ### 方式一：设置页（推荐）
 
@@ -215,6 +114,7 @@ DSH 设置 → 「桌宠配置」：
 
 - **大小**：宽度 px（高度自动 = 宽度 × 9/16）
 - **位置**：四角（corner）＋ 水平/垂直边距（marginX / marginY）
+- **显示位置**（display）：web=仅浏览器 / desktop=仅桌面 / both=两者都显示 / none=都不显示
 - **余额功能**：勾选后该宠物才会触发余额动画并显示余额气泡
 - **多开**：添加/删除宠物，每只宠物独立 id、大小、位置
 - 点「保存」**即时生效**（无需刷新）；「恢复默认」回到 config.jsonc 默认
@@ -225,12 +125,12 @@ DSH 设置 → 「桌宠配置」：
 
 ```jsonc
 "pets": [
-  { "id": "main", "size": 462, "balanceEnabled": true, "position": { "corner": "top-right", "marginX": 24, "marginY": 100 } }
+  { "id": "main", "size": 462, "balanceEnabled": true, "display": "both", "position": { "corner": "top-right", "marginX": 24, "marginY": 100 } }
 ]
 ```
 
-- 每只宠物：`id`（标识）／ `size`（宽度 px）／ `balanceEnabled`（是否启用余额功能，必填布尔）／ `position`（corner 四角之一 + marginX/marginY 边距）
-- 余额刷新周期：`eventsRefreshSec.balance`（秒）——余额数据刷新与余额动画触发的间隔，启动时立即触发一次，之后按此周期循环（默认 180）
+- 每只宠物：`id`（标识）／ `size`（宽度 px）／ `balanceEnabled`（是否启用余额功能，必填布尔）／ `display`（web/desktop/both/none，必填，见上）／ `position`（corner 四角之一 + marginX/marginY 边距）
+- 余额刷新周期：`eventsRefreshSec.balance`（秒）——余额数据刷新与余额动画触发的间隔，启动时立即触发一次，之后按此周期循环（默认 1800）
 - 设置页的修改保存到用户层 `$DSH_HOME/dsh-pet/main-config.json`（**完整宠物列表**，覆盖包内默认）；「恢复默认」即清除用户层、回落 config.jsonc
 
 ### 方式三：手动编辑配置文件（高级，任意自由配置）
@@ -256,7 +156,7 @@ $DSH_HOME/dsh-pet/
 ├─ main-config.json            ← 主宠物配置（现有，不动）
 ├─ main-animation/webm/*.webm  ← 主宠物素材（现有，只属于 main）
 └─ pet/
-   ├─ pig-config.json          ← 额外宠物 pig 的配置（命名词干 = 宠物 id）
+   ├─ pig-config.json          ← 额外宠物 pig 的配置（命名词干 = 种类名，实例 id 任意）
    └─ pig-animation/*.webm     ← pig 自己的动画素材（直接平铺，仿 main-animation）
 ```
 
@@ -306,6 +206,8 @@ $DSH_HOME/dsh-pet/
   <img src="assets/screenshots/dsh-pet-running-4.png" width="380" alt="dsh-pet 运行效果 4" title="dsh-pet 运行效果 4">
   <img src="assets/screenshots/dsh-pet-running-5.png" width="380" alt="dsh-pet 运行效果 5" title="dsh-pet 运行效果 5">
   <img src="assets/screenshots/dsh-pet-running-6.png" width="380" alt="dsh-pet 运行效果 6" title="dsh-pet 运行效果 6">
+  <img src="assets/screenshots/dsh-pet-running-7.png" width="380" alt="dsh-pet 运行效果 7" title="dsh-pet 运行效果 7">
+  <img src="assets/screenshots/dsh-pet-running-8.png" width="380" alt="dsh-pet 运行效果 8" title="dsh-pet 运行效果 8">
 </p>
 
 ## 效果预览
@@ -460,6 +362,110 @@ $DSH_HOME/dsh-pet/
 </p>
 
 > 注：动画为透明背景；GIF 预览中透明部分显示为页面底色，实际 webm 播放为透明。
+
+## 从零生成你自己的宠物（完整流程）
+
+### ① 提示词 → 源视频
+
+用 AI 视频生成工具（如可灵、Runway、豆包等，本项目素材即由豆包生成），按 `prompts/桌面宠物 10 秒动作提示词.md` 的配方，一个动作生成一段 10 秒绿幕视频：
+
+- 视频比例 16:9，背景纯绿幕（#00FF00）
+- 人物位置/大小固定（头顶 ~20% 高度、脚底 ~85% 高度）
+- 动作全程在画幅内，首尾帧为标准正面站立
+- 每段动画按秒分解（0-10s 各阶段动作）
+
+生成结果按动作各存一个 mp4，放入 `video/`。
+
+> **源视频获取**：为控制仓库体积，`video/` 源视频不入 git。Releases 提供**打包压缩包**，浏览器直接下载即可：
+>
+> - `assets-videos.zip` —— 全部源视频压缩包（中文名 mp4，解压后放入 `video/`）
+>
+> 解压：`Expand-Archive assets-videos.zip`（Windows）或 `unzip assets-videos.zip`，把 mp4 放回 `video/` 即可运行素材链。
+
+### ② 源视频 → 透明动画（素材链）
+
+step02（透明视频）有**两条路线，按需二选一**（默认自动、人人可复现；效果不佳可用 PR 手工抠像覆盖）：
+
+```sh
+cd scripts
+# 路线 A（默认）：自动绿幕抠像（HSV 色相，无需人工）
+python watermark_step01.py   # 水印遮罩填充 → step01/
+python chroma_step02.py      # 绿幕抠像转透明 → step02/
+
+# 路线 B（可选）：PR 手工抠像覆盖（针对含第三方物品/自动抠像效果不佳的动作）
+#   1. 在 PR 里手工抠像，导出带 alpha 的透明 .mov（如 ProRes 4444 with Alpha）
+#   2. 放入 pr/，文件名与动作名一致（如 吃白饭.mov）
+python pr_import_step02.py   # pr/*.mov → step02/（透明 webm，覆盖该动作自动抠像结果）
+
+# 后续步骤两条路线共用：
+python normalize_step03.py   # 归一化 2160×1215 统一站立居中 → step03/
+python encode_thumbs.py      # 转码 640×360 播放变体 → step04/
+```
+
+**依赖**：Python 3 + ffmpeg + numpy + scipy（素材链脚本自动用工作区 `.tools/` 下的 ffmpeg）。
+
+> **本项目全部采用路线 B**（97 个动作均为 PR 手工抠像）：对"含第三方物品/透明边缘复杂"的动作，自动 HSV 抠像易残边或误抠，PR 手动遮罩更精细。两条路线产出同一级 `step02/`，后续步骤完全一致；`chroma_step02.py` 保留为自动化兜底，任何动作仍可一键自动生成。
+
+### ②.5 🍎 Safari/HEVC 兼容流水线（保留，不参与发布，fork 定制用）
+
+插件**只发布单一 webm 格式**（VP9-alpha）：浏览器 overlay 的 Chrome/Edge/Firefox 与桌面模式（Electron = Chromium）共用，无需第二套素材；**宿主端 thumb 路由不发布 `.mov`**（`dsh-pet/src/host/index.ts`）。Safari 不认 webm alpha（渲染黑底）、只支持 **HEVC-with-Alpha mov**（编码器 `hevcWithAlpha` 仅 macOS 有），需要 Safari 兼容者可 **fork 仓库自行启用**保留的流水线并自行加回 `.mov` 路由：
+
+- workflow：`.github/workflows/hevc-alpha.yml`（手动触发 `workflow_dispatch`，macOS runner 云端批量转码）
+- 编码脚本：`scripts/encode_hevc_alpha.sh`（ffmpeg 解码 webm → BGRA 帧管线 → Swift `hevc_alpha_encoder.swift` 走 AVAssetWriter `hevcWithAlpha` 原生 API）+ `scripts/check_alpha.py`（产物校验）
+- 输入：`dsh-pet/assets/webm/*.webm`；输出写回 `dsh-pet/assets/mov/`（流水线输出目录，不入库不发布）；产物 `hvc1` tag + alpha 校验后打包为 artifact
+- 启用方式：自行把 mov 素材同步进包并恢复双格式支持（`prepare.js` 已收敛为 webm、宿主 thumb 路由已移除 `.mov`，源码历史里都有 mov 分支可参考）
+
+### ③ 动画 → 插件
+
+```sh
+# 把 step04 的播放变体同步进插件包（webm 直接 cp）
+cp step04/*.webm dsh-pet/assets/webm/   # 播放格式（VP9-alpha）
+
+# 本地安装插件
+dsh plugin --profile web add file:D:/path/to/dsh-pet
+```
+
+> 中间产物（step01-04）由脚本生成、不入仓库；`video/` 源视频和脚本是成果、入库维护。
+
+### 🎯 发布（单一 webm 格式）
+
+插件只发布一个 npm 包、一个素材格式（webm）；`files` 收敛为固定清单（lib / src / assets/webm / runtime/electron-helper / assets/fonts / assets/pic / assets/config.jsonc / scripts/ensure-electron.mjs / cordis.patch.yml，见 `prepare.js`；浏览器与桌面模式共用，包体最小）：
+
+```sh
+cd dsh-pet
+npm publish --tag latest   # npm publish 自动执行 prepare 钩子（构建完整产物 + 收敛 files），无需手动构建
+```
+
+- client 端不做运行时浏览器判断——唯一播放格式 webm 在源码写死，无发布期注入
+- 需要 Safari/HEVC 版：见上方 ②.5，fork 仓库后启用保留的流水线自行定制
+
+### 项目结构
+
+```
+├── prompts/                 # ① 各动作的生成提示词（绿幕规范 + 按秒分解）
+├── step01/                  # ② 素材链中间产物：水印去除后的绿幕视频（不入库）
+├── step02/                  # ② 素材链中间产物：抠像（不入库）
+├── step03/                  # ② 素材链中间产物：归一化 2160×1215 统一站立居中（不入库）
+├── step04/                  # ② 素材链中间产物：640×360 播放变体（不入库）
+├── scripts/                 # ② 素材生成链（Python：水印/抠像/归一化/转码）
+├── video/                   # ② 源视频（绿幕 mp4 + 水印 mask，一动作一文件；不入库，Releases 有压缩包）
+├── pr/                      # ② 路线 B 输入：PR 导出的透明 .mov（本地工作数据，不入库）
+├── prproj/                  # ② PR 工程目录（.prproj + 遮罩缓存 + 自动保存，本地不入库）
+├── tools/                   # 开发工具：preview.html（素材链各阶段效果预览）
+├── .github/workflows/       # CI：hevc-alpha.yml（macOS runner 批量转码 webm → mov，手动触发）
+├── dsh-pet/                 # ③ 插件（可独立 npm 发布）
+│   ├── src/                 #   TS 源码（host 半侧 /dsh-pet-7340 路由 + client 半侧动画链）
+│   ├── lib/                 #   tsdown 构建产物（prepare 自动构建，lib/*.js 不入库）
+│   ├── assets/webm/         #   640×360 VP9-alpha 播放动画（Chrome/Edge/Firefox 版素材，唯一发布格式）
+│   ├── assets/preview/      #   GIF 预览（README 展示用，拼音命名）
+│   ├── assets/fonts/        #   气泡/通知字体
+│   ├── assets/pic/          #   通知图标 + 手套光标
+│   ├── assets/config.jsonc  #   默认配置（动画池 / 权重 / 宠物列表，单一事实来源）
+│   ├── scripts/prepack-check.js  # 发布前健康检查
+│   └── scripts/prepare.js   # 发布前微调（构建完整产物 + 收敛 files）
+├── DESIGN.md                # 设计与实现文档
+└── LICENSE                  # MIT
+```
 
 ## 文档
 
