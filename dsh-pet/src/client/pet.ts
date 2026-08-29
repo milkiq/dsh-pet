@@ -434,13 +434,17 @@ export function makePetUI(rt: {
       moveRef.current = requestAnimationFrame(step);
     };
 
-    /** 尝试发起一次移动：占用中返回 true（不重播），无法移动返回 false，成功返回动作名（供日志显示具体动作） */
-    const tryMove = (): boolean | string => {
+    /** 尝试发起一次移动：占用中返回 true（不重播），无法移动返回 false，成功返回动作名（供日志显示具体动作）。
+ *  preferredName 传入时固定使用该动画（右键菜单点播移动动画），否则与随机链一致随机从 moves.actions 选。 */
+    const tryMove = (preferredName?: string): boolean | string => {
       if (moveRef.current !== null || pendingMoveRef.current || throwRef.current !== null) return true;
       const moves = petAnims.moves;
       const actions = moves.actions;
       if (!actions.length) return false;
-      const chosen = actions[Math.floor(Math.random() * actions.length)];
+      const chosen = preferredName
+        ? (actions.find((a) => a.name === preferredName) ?? null)
+        : actions[Math.floor(Math.random() * actions.length)];
+      if (!chosen) return false;
       const mp = Object.assign({}, moves.default, chosen.params || {});
       const dir = (facingRef.current === 'right') !== petAnims.turn.includes(animRef.current) ? 1 : -1;
       const W = window.innerWidth;
@@ -722,6 +726,16 @@ export function makePetUI(rt: {
       if (isNoMirrorAnimation(petAnims.categories, leaf.anim) && facingRef.current === 'right') {
         setFacing('left');
       }
+      // 点播移动动画：走真实移动（与随机移动同一套：边界检查 / 随机距离 / leadSec·tailSec 时段 / dir 计算），
+      // 仅"选哪个动画"由菜单决定；边界内挪不动（false）退化为纯播放，仍能看到该动画
+      if (petAnims.moves.actions.some((a) => a.name === leaf.anim)) {
+        if (tryMove(leaf.anim) === false) {
+          stopMove();
+          setOnce(true);
+          setAnim(leaf.anim);
+        }
+        return;
+      }
       stopMove();
       setOnce(true);
       setAnim(leaf.anim);
@@ -758,12 +772,14 @@ export function makePetUI(rt: {
       ? (() => {
           const rx = customPos.rx;
           const ry = customPos.ry;
-          const left = Math.min(
-            Math.max(rx * window.innerWidth - halfW, -sideAllow),
-            window.innerWidth - size + sideAllow,
-          );
-          const top = Math.min(Math.max(ry * window.innerHeight - halfH, 0), window.innerHeight - (size * 9) / 16);
-          return { left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' };
+          // 拖拽位置即松手位置：不做边界夹取——宠物可被拖到屏幕任意位置（含贴边/出界），
+          // 松手不会被拉回；漫游/抛掷路径自身目标已界内，不受影响。
+          return {
+            left: rx * window.innerWidth - halfW + 'px',
+            top: ry * window.innerHeight - halfH + 'px',
+            right: 'auto',
+            bottom: 'auto',
+          };
         })()
       : {};
     const commonVideoProps = { muted: true, playsInline: true, autoPlay: true, title: 'dsh-pet' };

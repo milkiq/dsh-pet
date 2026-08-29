@@ -416,12 +416,16 @@ class PetSprite {
   }
 
   // ---- 漫游（rAF 驱动，动画首尾各 leadSec/tailSec 秒原地不动；几何在 shared/planMove） ----
-  tryMove() {
+  // preferredName 传入时固定使用该动画（右键菜单点播移动动画），否则与随机链一致随机选
+  tryMove(preferredName) {
     if (this.moveRef !== null || this.pendingMove || this.throwRef !== null) return true;
     const moves = this.animations.moves;
     const actions = moves.actions;
     if (!actions.length) return false;
-    const chosen = actions[Math.floor(Math.random() * actions.length)];
+    const chosen = preferredName
+      ? actions.find((a) => a.name === preferredName) || null
+      : actions[Math.floor(Math.random() * actions.length)];
+    if (!chosen) return false;
     const mp = Object.assign({}, moves.default, chosen.params || {});
     const dir = (this.facing === 'right') !== this.animations.turn.includes(this.anim) ? 1 : -1;
     const W = VIEW.w;
@@ -798,6 +802,12 @@ class PetSprite {
     // 文字类（noMirror）朝右站姿是镜像的：点播前强制朝左，避免文字镜像（与浏览器随机链"朝右不选文字"同语义）
     if (S.isNoMirrorAnimation(this.animations.categories, leaf.anim) && this.facing === 'right') {
       this.facing = 'left';
+    }
+    // 点播移动动画：走真实移动（与随机游走同一套：边界检查 / 随机距离 / leadSec·tailSec / dir），
+    // 仅"选哪个动画"由菜单决定；挪不动（false）退化纯播放
+    if (this.animations.moves.actions.some((a) => a.name === leaf.anim)) {
+      if (this.tryMove(leaf.anim) === false) this.playOnce(leaf.anim);
+      return;
     }
     this.playOnce(leaf.anim);
   }
