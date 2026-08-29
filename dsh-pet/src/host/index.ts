@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { queryBalance } from './balance';
-import { HelperProcess } from './helper-process';
+import { HelperProcess, defaultElectronExe, ensureElectronDownload, resolveElectronPath } from './helper-process';
 
 /** 插件行 id（与 cordis.patch.yml 一致） */
 export const name = 'pet';
@@ -426,11 +426,12 @@ export function apply(ctx: any): void {
 
   let helper: HelperProcess | undefined;
   let startRetryTimer: NodeJS.Timeout | undefined;
+  let electronEnsure: Promise<void> | undefined;
+  let disposed = false;
 
-  /** 拉起桌面 Helper（Electron 为每只桌面宠物开一个局部小窗口）；
-   *  Electron 缺失时仅告警，不影响 DSH 与浏览器 overlay。 */
-  const startHelper = (): void => {
-    if (helper) return;
+  /** 用已确认存在的 Electron 路径拉起桌面 Helper（每只桌面宠物一个局部小窗口）。 */
+  const launchHelper = (electronPath: string | undefined): void => {
+    if (helper || disposed) return;
     if (!hasDesktopPet) return; // 无宠物显示在桌面（display 含 desktop/both）：不启动
     const port = typeof ctx.webServer?.port === 'number' ? ctx.webServer.port : 0;
     if (!port || port <= 0) {
@@ -438,7 +439,7 @@ export function apply(ctx: any): void {
       if (!startRetryTimer) {
         startRetryTimer = setTimeout(() => {
           startRetryTimer = undefined;
-          startHelper();
+          launchHelper(electronPath);
         }, 500);
         startRetryTimer.unref?.();
       }
@@ -448,6 +449,7 @@ export function apply(ctx: any): void {
     const configUrl = `${origin}${ROUTE_PREFIX}/config.jsonc`;
     helper = new HelperProcess(
       {
+        electronPath,
         env: {
           DSH_PET_CONFIG_URL: configUrl,
           DSH_PET_SCALE: '1',
@@ -464,6 +466,32 @@ export function apply(ctx: any): void {
       ctx.logger?.warn?.(`dsh-pet desktop helper start failed: ${e instanceof Error ? e.message : String(e)}`);
       helper = undefined;
     }
+  };
+
+  /** 拉起桌面 Helper：先探测本机 Electron；缺失时进程内异步下载
+   *  （不 spawn 子进程，CLI node 与 DSH Desktop 均适用），下载完成后自动拉起。 */
+  const startHelper = (): void => {
+    if (helper || electronEnsure || disposed) return;
+    if (!hasDesktopPet) return; // 无宠物显示在桌面（display 含 desktop/both）：不启动
+    const found = resolveElectronPath();
+    if (found) {
+      launchHelper(found);
+      return;
+    }
+    console.warn(`[dsh-pet] Electron not found, downloading to ${defaultElectronExe()} ...`);
+    electronEnsure = ensureElectronDownload()
+      .then((path) => {
+        if (path) {
+          launchHelper(path);
+        } else {
+          console.warn(
+            '[dsh-pet] Electron download failed; desktop pet unavailable. Set DSH_PET_ELECTRON_PATH and restart, or retry later.',
+          );
+        }
+      })
+      .finally(() => {
+        electronEnsure = undefined;
+      });
   };
 
   /** 停止桌面 Helper（保留配置，可再次拉起）。 */
@@ -724,8 +752,9 @@ export function apply(ctx: any): void {
   // 系统通知不在此处：它独立于宠物（浏览器半侧 notify.ts 经 connection 事件流监听），
   // 宿主无需任何通知端点/监听。
 
-  // 随插件生命周期清理：桌面 Helper 回收
+  // 随插件生命周期清理：桌面 Helper 回收（异步下载完成后不再拉起）
   ctx.effect(() => () => {
+    disposed = true;
     stopHelper('dsh-host-stop');
   });
 

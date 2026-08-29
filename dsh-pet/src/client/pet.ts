@@ -435,7 +435,7 @@ export function makePetUI(rt: {
     };
 
     /** 尝试发起一次移动：占用中返回 true（不重播），无法移动返回 false，成功返回动作名（供日志显示具体动作）。
- *  preferredName 传入时固定使用该动画（右键菜单点播移动动画），否则与随机链一致随机从 moves.actions 选。 */
+     *  preferredName 传入时固定使用该动画（右键菜单点播移动动画），否则与随机链一致随机从 moves.actions 选。 */
     const tryMove = (preferredName?: string): boolean | string => {
       if (moveRef.current !== null || pendingMoveRef.current || throwRef.current !== null) return true;
       const moves = petAnims.moves;

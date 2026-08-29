@@ -6,11 +6,14 @@
  * 以子进程方式拉起 electron-helper/main.js，并在异常退出时自动重启。
  */
 
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createWriteStream, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { tmpdir } from 'node:os';
 
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -39,8 +42,9 @@ type Logger = {
  * 优先级：
  *   1. 显式候选（用户配置）/ DSH_PET_ELECTRON_PATH 环境变量
  *   2. 本机已安装的 electron npm 包（require('electron') 返回二进制路径）
- *   3. 常见安装位置（~/.dsh/electron、npm 全局目录、Program Files）
- *   4. 都不存在时尝试 scripts/ensure-electron.mjs 自动下载
+ *   3. 常见安装位置（$DSH_HOME/electron（默认 ~/.dsh/electron）、npm 全局目录、Program Files）
+ *   4. 都不存在时由 ensureElectronDownload() 进程内异步下载（不 spawn 子进程，
+ *      避免 process.execPath 在 Electron 宿主（如 DSH Desktop）里指向宿主 exe 导致崩溃）
  */
 export function resolveElectronPath(candidates: Array<string | undefined> = []): string | undefined {
   const seen = new Set<string>();
@@ -61,8 +65,10 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
   const userProfile = process.env.USERPROFILE || process.env.HOME || '';
   const appData = process.env.APPDATA || join(userProfile, 'AppData', 'Roaming');
   const localAppData = process.env.LOCALAPPDATA || join(userProfile, 'AppData', 'Local');
+  // DSH 主目录：与 ensure-electron.mjs 保持一致，认 DSH_HOME（默认 ~/.dsh）
+  const dshHome = process.env.DSH_HOME || join(userProfile, '.dsh');
   const localCandidates = [
-    join(userProfile, '.dsh', 'electron', 'electron.exe'),
+    join(dshHome, 'electron', 'electron.exe'),
     join(appData, 'npm', 'node_modules', 'electron', 'dist', 'electron.exe'),
     join(localAppData, 'Programs', 'Electron', 'electron.exe'),
     'C:/Program Files/Electron/electron.exe',
@@ -70,26 +76,162 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
   ];
   for (const candidate of localCandidates) push(candidate);
   if (process.env.ELECTRON_PATH) push(process.env.ELECTRON_PATH);
-  if (!list.some((value) => existsSync(value))) {
-    const ensured = ensureElectron();
-    if (ensured) push(ensured);
-  }
   return list.find((value) => existsSync(value));
 }
 
-/** 自动下载 Electron 到 $DSH_HOME/electron（scripts/ensure-electron.mjs）。 */
-function ensureElectron(): string | undefined {
-  const script = resolve(packageRoot, 'scripts', 'ensure-electron.mjs');
-  if (!existsSync(script)) return undefined;
-  console.log('[dsh-pet] Electron not found, running ensure-electron.mjs ...');
-  const result = spawnSync(process.execPath, [script], {
-    stdio: 'inherit',
-    timeout: 10 * 60 * 1000,
+/** $DSH_HOME（默认 ~/.dsh），与 ensure-electron.mjs 的 HOME 计算一致。 */
+export function dshHomeDir(): string {
+  const userProfile = process.env.USERPROFILE || process.env.HOME || '';
+  return process.env.DSH_HOME || join(userProfile, '.dsh');
+}
+
+/** Electron 落地路径：$DSH_HOME/electron/electron.exe。 */
+export function defaultElectronExe(): string {
+  return join(dshHomeDir(), 'electron', 'electron.exe');
+}
+
+export interface EnsureElectronOptions {
+  /** Electron 版本号（默认 43.3.0，可被 DSH_PET_ELECTRON_VERSION 覆盖）。 */
+  version?: string;
+  /** 下载镜像（默认 npmmirror，可被 DSH_PET_ELECTRON_MIRROR 覆盖）。 */
+  mirror?: string;
+  /** 单次下载超时（默认 10 分钟）。 */
+  timeoutMs?: number;
+}
+
+/** 解压后必须存在的关键文件（校验下载完整性，缺则清理重试）。 */
+const REQUIRED_FILES = [
+  'electron.exe',
+  'icudtl.dat',
+  'resources.pak',
+  'snapshot_blob.bin',
+  'chrome_100_percent.pak',
+  'v8_context_snapshot.bin',
+];
+
+/** 以子进程方式跑一条命令（tar/powershell），返回退出码（不依赖 process.execPath）。 */
+function runProcess(command: string, args: string[]): Promise<number> {
+  return new Promise((resolveProcess) => {
+    const child = spawn(command, args, { stdio: 'inherit', windowsHide: true });
+    child.once('error', () => resolveProcess(1));
+    child.once('exit', (code) => resolveProcess(code ?? 1));
   });
-  if (result.status !== 0) return undefined;
-  const home = process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.dsh');
-  const exe = join(home, 'electron', 'electron.exe');
-  return existsSync(exe) ? exe : undefined;
+}
+
+async function extractZip(zipPath: string, targetDir: string): Promise<void> {
+  mkdirSync(targetDir, { recursive: true });
+  // Windows 自带 tar（bsdtar）可以直接解压 zip；失败时退回 PowerShell Expand-Archive。
+  const tar = await runProcess('tar', ['-xf', zipPath, '-C', targetDir]);
+  if (tar !== 0) {
+    const ps = await runProcess('powershell', [
+      '-NoProfile',
+      '-Command',
+      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${targetDir}' -Force`,
+    ]);
+    if (ps !== 0) {
+      throw new Error('failed to extract Electron zip');
+    }
+  }
+  // 校验关键文件是否完整；不完整说明下载/解压失败，清理后重试。
+  const missing = REQUIRED_FILES.filter((name) => !existsSync(join(targetDir, name)));
+  if (missing.length > 0) {
+    rmSync(targetDir, { recursive: true, force: true });
+    throw new Error(`Electron zip incomplete, missing: ${missing.join(', ')}`);
+  }
+}
+
+/**
+ * 进程内下载并解压 Electron 到 $DSH_HOME/electron。
+ * 不 spawn 子进程：在 CLI node 与 Electron 宿主（DSH Desktop）里都可用，
+ * 修复原 ensure-electron.mjs 用 process.execPath 调脚本导致宿主重复拉起的问题。
+ * 已存在则原样返回；失败返回 undefined（不影响 DSH 与浏览器 overlay）。
+ */
+export async function ensureElectronDownload(options: EnsureElectronOptions = {}): Promise<string | undefined> {
+  const version = options.version || process.env.DSH_PET_ELECTRON_VERSION || '43.3.0';
+  const mirror = options.mirror || process.env.DSH_PET_ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/';
+  const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
+  const targetDir = join(dshHomeDir(), 'electron');
+  const exe = join(targetDir, 'electron.exe');
+  if (existsSync(exe)) return exe;
+
+  // 下载日志用 console 直出（ctx.logger 在部分宿主不映射到终端，排障时看不到）。
+  const log = (message: string): void => console.log(`[dsh-pet] ${message}`);
+  const warn = (message: string): void => console.warn(`[dsh-pet] ${message}`);
+  const startedAt = Date.now();
+
+  log(`Electron not found, downloading v${version} ...`);
+  mkdirSync(targetDir, { recursive: true });
+  const zipName = `electron-v${version}-win32-x64.zip`;
+  const url = `${mirror.replace(/\/$/, '')}/${version}/${zipName}`;
+  const zipPath = join(tmpdir(), zipName);
+
+  try {
+    log(`GET ${url}`);
+    // 下载超时控制：AbortController + 定时器，超时中断 fetch 流。
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error(`Electron download timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref?.();
+    try {
+      const response = await fetch(url, { redirect: 'follow', signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`download failed: ${response.status} ${response.statusText} (${url})`);
+      }
+      if (!response.body) {
+        throw new Error(`download empty body (${url})`);
+      }
+      // Response.body 是 Web ReadableStream，转为 Node 流再交给 pipeline（类型安全）。
+      const totalBytes = Number(response.headers.get('content-length') ?? 0);
+      let received = 0;
+      let nextLogAt = Date.now() + 3000;
+      const progress = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          received += chunk.length;
+          const now = Date.now();
+          if (received > 0 && now >= nextLogAt) {
+            const percent =
+              totalBytes > 0
+                ? `${Math.round((received / totalBytes) * 100)}%`
+                : `${(received / 1024 / 1024).toFixed(1)}MB`;
+            log(
+              `downloading ${(received / 1024 / 1024).toFixed(1)}MB / ${(totalBytes / 1024 / 1024).toFixed(1)}MB (${percent})`,
+            );
+            nextLogAt = now + 3000;
+          }
+          callback(null, chunk);
+        },
+      });
+      await pipeline(
+        Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
+        progress,
+        createWriteStream(zipPath),
+      );
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      log(`download complete (${(received / 1024 / 1024).toFixed(1)}MB in ${seconds}s)`);
+    } finally {
+      clearTimeout(timer);
+    }
+    log(`extracting to ${targetDir} ...`);
+    await extractZip(zipPath, targetDir);
+    if (!existsSync(exe)) {
+      throw new Error('Electron zip extracted, but electron.exe not found');
+    }
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    log(`ready in ${seconds}s: ${exe}`);
+    return exe;
+  } catch (error) {
+    warn(`ensure failed: ${error instanceof Error ? error.message : String(error)}`);
+    warn('desktop pet unavailable. Set DSH_PET_ELECTRON_PATH to an existing Electron, or retry later.');
+    return undefined;
+  } finally {
+    try {
+      rmSync(zipPath, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function defaultLaunch(options: HelperOptions = {}): { command: string; args: string[] } {
