@@ -29,8 +29,8 @@ export interface MenuLeaf {
   label: string;
   /** 播放的动画名（点播动作）；action 优先于 anim */
   anim?: string;
-  /** 自定义动作：open-site=打开网站 / show-balance=查看余额（桌面端专属）；home=回到初始位置（两端共用） */
-  action?: 'open-site' | 'show-balance' | 'home';
+  /** 自定义动作：open-site=打开网站 / show-balance=查看余额；whisper=立即碎碎念一句（手动触发）；home=回到初始位置（两端共用） */
+  action?: 'open-site' | 'show-balance' | 'whisper' | 'home';
 }
 
 /** 分支：带子菜单的项 */

@@ -102,6 +102,15 @@
       .pet-bubble.is-on {
         opacity: 1;
       }
+      /* 碎碎念变体：与浏览器 overlay 一致 —— 字号缩到余额气泡的 0.75、取消 nowrap 允许换行、
+         宽度随文字数量自适应（短句窄框、长句封顶绕行），高度随行数自然增长 */
+      .pet-bubble.is-whisper {
+        font-size: calc(var(--pet-size, 462px) * 0.034);
+        min-width: calc(var(--pet-size, 462px) * 0.1);
+        max-width: calc(var(--pet-size, 462px) * 0.5);
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
       .pet-bub-row {
         display: flex;
         justify-content: space-between;

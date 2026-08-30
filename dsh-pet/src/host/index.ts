@@ -372,6 +372,34 @@ export function apply(ctx: any): void {
   // 同宠物的多个端共享一句、避免重复 LLM 调用（进程内内存态，重启清空）
   const whisperCache = new Map<string, { text: string; ts: number }>();
 
+  /** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
+   *  按宠物独立生成（文件宠物用自己种类的人设），缓存按 pet 分开；
+   *  force=false 走周期节流（缓存期内返回同一句 ts），force=true 强制新生成并刷新缓存
+   *  （右键菜单「碎碎念」手动触发：绕过节流立即新出一句，同宠多端下次轮询看到新 ts 一起展示）。 */
+  const serveWhisper = async (
+    petId: string,
+    force: boolean,
+  ): Promise<{ ok: boolean; text?: string; ts?: number; reason?: string; message?: string }> => {
+    const merged = readMergedConfig();
+    const ers = merged.eventsRefreshSec as Record<string, unknown> | undefined;
+    const intervalSec = ers && typeof ers.whisper === 'number' ? ers.whisper : 3600;
+    // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层
+    const system =
+      (petId ? readPetWhisperPrompt(petId) : undefined) ??
+      (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+    const now = Date.now();
+    const cached = whisperCache.get(petId);
+    if (!force && cached && now - cached.ts < intervalSec * 1000) {
+      return { ok: true, text: cached.text, ts: cached.ts };
+    }
+    const result = await generateWhisper(ctx, system);
+    if (!result.ok) {
+      return { ok: false, reason: result.reason, message: result.message };
+    }
+    whisperCache.set(petId, { text: result.text, ts: now });
+    return { ok: true, text: result.text, ts: now };
+  };
+
   // 桌面宠物 = display 含 desktop 的第一只（桌面窗口会渲染全部 desktop/both 宠物，
   // 这里只需判定「是否存在」以决定是否拉起 Helper；大小由宠物自己的配置决定，宿主不再传）。
   const validatePets = (arr: unknown[]): Record<string, unknown>[] =>
@@ -696,7 +724,7 @@ export function apply(ctx: any): void {
             return;
           }
 
-          // 碎碎念生成：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
+          // 碎碎念周期文本：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
           // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**自己种类的人设**生成一句话
           // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = 合并配置顶层 whisperPrompt）。
           // 节流/缓存按 pet 分开：同一宠物周期内重复请求返回同一句（ts 不变，client 检测变化才触发），
@@ -708,26 +736,28 @@ export function apply(ctx: any): void {
             }
             try {
               const petId = String(url.searchParams.get('pet') ?? '');
-              const merged = readMergedConfig();
-              const ers = merged.eventsRefreshSec as Record<string, unknown> | undefined;
-              const intervalSec = ers && typeof ers.whisper === 'number' ? ers.whisper : 3600;
-              // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层
-              const system =
-                (petId ? readPetWhisperPrompt(petId) : undefined) ??
-                (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
-              const now = Date.now();
-              const cached = whisperCache.get(petId);
-              if (cached && now - cached.ts < intervalSec * 1000) {
-                sendJson(res, 200, { ok: true, text: cached.text, ts: cached.ts });
-                return;
-              }
-              const result = await generateWhisper(ctx, system);
-              if (!result.ok) {
-                sendJson(res, 200, { ok: false, reason: result.reason, message: result.message });
-                return;
-              }
-              whisperCache.set(petId, { text: result.text, ts: now });
-              sendJson(res, 200, { ok: true, text: result.text, ts: now });
+              sendJson(res, 200, await serveWhisper(petId, false));
+            } catch (e) {
+              sendJson(res, 200, {
+                ok: false,
+                reason: 'generate-error',
+                message: e instanceof Error ? e.message : String(e),
+              });
+            }
+            return;
+          }
+
+          // 碎碎念手动触发：/dsh-pet-7340/whisper/trigger?pet=<id>（GET，右键菜单「碎碎念」用）
+          // 与周期端点同一逻辑，但 force=true：绕过节流缓存立即强制新生成一句并刷新缓存
+          // （同宠物周期轮询端下次拉取看到新 ts 也会跟着展示——与 /balance/trigger 同语义）。
+          if (rest === 'whisper/trigger') {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'method not allowed' });
+              return;
+            }
+            try {
+              const petId = String(url.searchParams.get('pet') ?? '');
+              sendJson(res, 200, await serveWhisper(petId, true));
             } catch (e) {
               sendJson(res, 200, {
                 ok: false,

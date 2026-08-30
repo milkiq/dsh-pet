@@ -57,6 +57,12 @@ export async function fetchWhisperState(baseUrl: string = '/dsh-pet-7340/whisper
   return { ok: true, text, ts };
 }
 
+/** 手动触发一次碎碎念（右键菜单「碎碎念」项用）：host 强制立即新生成一句并更新缓存
+ *  （绕过节流——周期内的轮询端下次拉取看到新 ts 也会跟着展示，与 /balance/trigger 同语义）。 */
+export function fetchWhisperTrigger(baseUrl: string = '/dsh-pet-7340/whisper/trigger'): Promise<WhisperState> {
+  return fetchWhisperState(baseUrl);
+}
+
 /** 碎碎念气泡行数据：一句话（role:'label' 单行，复用余额气泡的通用行渲染） */
 export type WhisperBubbleRow = { role: 'label'; text: string };
 

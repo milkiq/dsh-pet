@@ -28,6 +28,11 @@ const bubbleCss = [
     'transform:translateX(-50%);border:calc(var(--dsh-pet-size)*0.017) solid transparent;' +
     'border-top-color:rgba(255,255,255,.92);border-bottom:none}',
   '.dsh-pet-bubble.is-on{opacity:1}',
+  // 碎碎念变体：字号缩到余额气泡的 0.75（0.0455→0.034）、取消 nowrap 允许换行、
+  // 宽度随文字数量自适应（短句窄框、长句封顶绕行），高度随行数自然增长
+  '.dsh-pet-bubble.dsh-pet-whisper{font-size:calc(var(--dsh-pet-size)*0.034);' +
+    'min-width:calc(var(--dsh-pet-size)*0.10);max-width:calc(var(--dsh-pet-size)*0.5);' +
+    'white-space:normal;overflow-wrap:anywhere}',
   '.dsh-pet-bubble .pet-bub-title{font-size:calc(var(--dsh-pet-size)*0.035);color:rgba(43,43,43,.6);margin-bottom:calc(var(--dsh-pet-size)*0.009)}',
   '.dsh-pet-bubble .pet-bub-row{display:flex;justify-content:space-between;gap:calc(var(--dsh-pet-size)*0.030)}',
   '.dsh-pet-bubble .pet-bub-sub{font-size:calc(var(--dsh-pet-size)*0.035);color:rgba(43,43,43,.6)}',
@@ -108,7 +113,7 @@ export function makeWhisperBubble(rt: { h: typeof jsx }): (props: { text: string
   return function WhisperBubble({ text, on }: { text: string; on: boolean }) {
     const rows = whisperBubbleView({ ok: true, text, ts: 0 });
     return h('div', {
-      className: 'dsh-pet-bubble' + (on ? ' is-on' : ''),
+      className: 'dsh-pet-bubble dsh-pet-whisper' + (on ? ' is-on' : ''),
       children: rowsToNodes(h, rows),
     });
   };

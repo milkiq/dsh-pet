@@ -779,10 +779,11 @@ class PetSprite {
     e.preventDefault();
     this.stopThrow(); // 菜单弹出前停住飞行中的宠物
     this.stopMove(); // 菜单悬停期间宠物不漫游
-    // 桌面专属工具根项（打开网站 / 查看余额 / 回到初始位置）+ 共享菜单树（动作→分类→具体动画）
+    // 桌面专属工具根项（打开网站 / 查看余额 / 碎碎念 / 回到初始位置）+ 共享菜单树（动作→分类→具体动画）
+    // 碎碎念项无条件显示：手动触发不受 whisperEnabled 限制（该字段只影响自动周期轮询）
     const tools = [{ label: '打开网站', action: 'open-site' }];
     if (this.pet.balanceEnabled) tools.push({ label: '查看余额', action: 'show-balance' });
-    tools.push({ label: '回到初始位置', action: 'home' });
+    tools.push({ label: '碎碎念', action: 'whisper' }, { label: '回到初始位置', action: 'home' });
     const tree = tools.concat(S.buildMenuTree(this.animations));
     if (!tree.length) return;
     this.menuOpen = true;
@@ -811,6 +812,10 @@ class PetSprite {
     }
     if (leaf.action === 'show-balance') {
       this.showBalanceFromMenu(); // 立即拉余额并展示（无需等 1s 触发轮询，展示路径与周期触发一致）
+      return;
+    }
+    if (leaf.action === 'whisper') {
+      this.showWhisperFromMenu(); // 立即让 host 强制新生成一句并展示（绕过节流；展示路径与周期触发一致）
       return;
     }
     if (leaf.action === 'home') {
@@ -857,6 +862,23 @@ class PetSprite {
       })
       .catch((e) => {
         console.error('[dsh-pet] 菜单查看余额异常', e);
+      });
+  }
+
+  // 「碎碎念」菜单：立即让 host 强制新生成一句并展示（绕过节流缓存；
+  // /whisper/trigger 与周期端点同一逻辑但 force=true；失败显式告警，不伪造文案）
+  // 手动触发不受 whisperEnabled 限制——该字段只关自动周期轮询，手动永远可用。
+  showWhisperFromMenu() {
+    S.fetchWhisperTrigger(WHISPER_URL + '/trigger?pet=' + encodeURIComponent(this.pet.id))
+      .then((state) => {
+        if (state.ok) {
+          this.showWhisper(state.text);
+        } else {
+          console.warn('[dsh-pet] 菜单碎碎念失败 reason=' + state.reason + (state.message ? ' ' + state.message : ''));
+        }
+      })
+      .catch((e) => {
+        console.warn('[dsh-pet] 菜单碎碎念异常', e);
       });
   }
 
@@ -977,6 +999,8 @@ class PetSprite {
   }
 
   renderBubble() {
+    // 碎碎念变体样式开关：碎碎念气泡小字号+换行+自适应宽，余额气泡保持原样式
+    this.bubble.classList.toggle('is-whisper', this.whisperOn && !!this.whisperView);
     // 碎碎念气泡优先显示（若同时有余额气泡在展示，碎碎念覆盖）；两者都关时隐藏
     if (this.whisperOn && this.whisperView) {
       this.bubble.innerHTML = '';

@@ -15,7 +15,7 @@ import {
   type UserOverrides,
 } from '../shared/config';
 import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from '../shared/balance';
-import { fetchWhisperState } from '../shared/whisper';
+import { fetchWhisperState, fetchWhisperTrigger } from '../shared/whisper';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
 import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH } from '../shared/constants';
 // 统一右键菜单：与桌面共用同一份组件（树 + 渲染 + 样式，src/shared/menu.ts）
@@ -809,9 +809,26 @@ export function makePetUI(rt: {
 
     // ---- 右键菜单（统一自绘组件：树 + 渲染 + 样式与桌面共用 src/shared/menu.ts） ----
     // 注意：菜单是独立浮层，只在宠物命中区拦截右键（preventDefault + stopPropagation），
-    // 绝不进入/改动 DSH 页面自己的菜单；浏览器端只有「回到初始位置 + 动作」——
+    // 绝不进入/改动 DSH 页面自己的菜单；浏览器端只有「碎碎念 / 回到初始位置 + 动作」——
     // 无「打开网站 / 查看余额」（打开网站=就在网页里；查看余额已由对话框 /balance 命令实现）。
     const handleMenuAction = (leaf: MenuLeaf) => {
+      if (leaf.action === 'whisper') {
+        // 手动碎碎念：强制 host 立即新生成一句并展示（绕过节流缓存；失败显式告警，不伪造文案）。
+        // 手动触发不受 whisperEnabled 限制——该字段只关自动周期轮询，手动永远可用。
+        console.info('[dsh-pet] 菜单触发碎碎念 pet=' + cfg.id);
+        fetchWhisperTrigger('/dsh-pet-7340/whisper/trigger?pet=' + encodeURIComponent(cfg.id))
+          .then((state) => {
+            if (state.ok) {
+              triggerWhisper(state.text);
+            } else {
+              console.warn(
+                '[dsh-pet] 碎碎念手动触发失败 reason=' + state.reason + (state.message ? ' ' + state.message : ''),
+              );
+            }
+          })
+          .catch((e) => console.warn('[dsh-pet] 碎碎念手动触发异常', e));
+        return;
+      }
       if (leaf.action === 'home') {
         // 回到初始位置：停漫游/移动/抛掷，清掉拖拽/漫游留下的会话位置，回配置角落
         stopThrow();
@@ -839,8 +856,13 @@ export function makePetUI(rt: {
       setAnim(leaf.anim);
     };
     const handleContextMenu = (e: ReactNS.MouseEvent<HTMLDivElement>) => {
-      // 工具项（回到初始位置，两端共用）+ 动作树（动作→分类→具体动画）
-      const tree: MenuNode[] = [{ label: '回到初始位置', action: 'home' }, ...buildMenuTree(petAnims)];
+      // 工具项（碎碎念——手动触发**不受 whisperEnabled 限制**，该字段只影响自动周期轮询；
+      // 回到初始位置，两端共用）+ 动作树（动作→分类→具体动画）
+      const tree: MenuNode[] = [
+        { label: '碎碎念', action: 'whisper' },
+        { label: '回到初始位置', action: 'home' },
+        ...buildMenuTree(petAnims),
+      ];
       if (!tree.length) return;
       e.preventDefault();
       e.stopPropagation(); // 不触碰 DSH 页面任何菜单/右键处理
