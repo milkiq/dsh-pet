@@ -39,7 +39,8 @@ const ORIGIN = new URL(CONFIG.configUrl).origin;
 const withSuffix = (suffix) => CONFIG.configUrl.replace(/config\.jsonc$/, suffix);
 const BALANCE_URL = withSuffix('balance');
 const TRIGGER_URL = withSuffix('balance/trigger');
-const BUBBLE_DURATION_MS = 10 * 1000; // 余额气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
+const WHISPER_URL = withSuffix('whisper');
+const BUBBLE_DURATION_MS = 10 * 1000; // 余额/碎碎念气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
 // 窗口四周外扩 = 该比例 × 宠物尺寸：为气泡 / 未来可能的弹窗预留显示空间；
 // 外扩区透明且点击穿透（只有身体命中区可交互）。单点可调——按实际观感改这里。
 const WINDOW_MARGIN_RATIO = 0.5;
@@ -193,6 +194,14 @@ class PetSprite {
     this.bubbleTimer = null;
     this.balanceView = null;
     this.prevTick = 0;
+    // 碎碎念（每只独立：自己轮询 /whisper?pet=<id>、自己的文本与触发）
+    this.whisperOn = false;
+    this.whisperTimer = null;
+    this.whisperView = null;
+    this.whisperText = '';
+    this.whisperBaseline = false;
+    this.prevWhisperTs = 0;
+    this.whisperLoopTimer = null;
 
     // DOM：sprite 钉在窗口内 (margin.l, margin.t)；宠物"位置"= sprite 位置，窗口随余量外扩
     this.el = document.createElement('div');
@@ -260,6 +269,8 @@ class PetSprite {
   dispose() {
     this.ac.abort();
     if (this.bubbleTimer !== null) window.clearTimeout(this.bubbleTimer);
+    if (this.whisperTimer !== null) window.clearTimeout(this.whisperTimer);
+    if (this.whisperLoopTimer !== null) window.clearTimeout(this.whisperLoopTimer);
     this.closeMenu();
     this.stopThrow();
     this.stopDragFollow();
@@ -865,6 +876,77 @@ class PetSprite {
     this.showBalanceNow(state);
   }
 
+  // ---- 碎碎念（每只宠物独立：按 eventsRefreshSec.whisper 周期轮询自己的句子，用本种类人设生成） ----
+  startWhisperLoop() {
+    if (!this.pet.whisperEnabled || this.whisperLoopTimer !== null) return;
+    const intervalMs = Math.max(1000, (this.cfg.eventsRefreshSec?.whisper ?? 3600) * 1000);
+    const refresh = async () => {
+      try {
+        const petId = encodeURIComponent(this.pet.id);
+        const state = await S.fetchWhisperState(WHISPER_URL + '?pet=' + petId);
+        if (!this.whisperBaseline) {
+          this.whisperBaseline = true; // 首次仅记基线：避免启动/刷新时重放历史事件
+          if (state.ok) {
+            this.prevWhisperTs = state.ts;
+            this.whisperText = state.text;
+          }
+          return;
+        }
+        if (!state.ok) {
+          console.warn(
+            '[dsh-pet] 碎碎念生成失败 pet=' +
+              this.pet.id +
+              ' reason=' +
+              state.reason +
+              (state.message ? ' ' + state.message : ''),
+          );
+          return;
+        }
+        if (state.ts !== this.prevWhisperTs) {
+          this.prevWhisperTs = state.ts;
+          this.whisperText = state.text;
+          this.showWhisper(state.text);
+        }
+      } catch (e) {
+        console.warn('[dsh-pet] 碎碎念拉取异常 pet=' + this.pet.id, e);
+      }
+    };
+    this.whisperLoopTimer = window.setInterval(() => void refresh(), intervalMs);
+    void refresh();
+  }
+
+  // 碎碎念展示（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（10s 消失，与余额同一语义）
+  showWhisper(text) {
+    const pool = this.animations.events?.whisper;
+    if (!pool || pool.length === 0) {
+      console.error('[dsh-pet] 配置缺少 animations.events.whisper，无法播放碎碎念动画');
+      return;
+    }
+    const name = pool[Math.floor(Math.random() * pool.length)];
+    console.log(
+      '[dsh-pet] ' +
+        new Date().toTimeString().slice(0, 8) +
+        ' whisper pet=' +
+        this.pet.id +
+        ' -> [' +
+        name +
+        '] 「' +
+        text +
+        '」',
+    );
+    this.stopMove();
+    this.whisperOn = true;
+    this.whisperView = S.whisperBubbleView({ ok: true, text, ts: 0 });
+    this.renderBubble();
+    // 气泡 10s 定时消失（与动画解耦，与余额同一语义；重复触发先清旧定时器）
+    if (this.whisperTimer !== null) window.clearTimeout(this.whisperTimer);
+    this.whisperTimer = window.setTimeout(() => {
+      this.whisperOn = false;
+      this.renderBubble();
+    }, BUBBLE_DURATION_MS);
+    this.playOnce(name);
+  }
+
   // 余额展示（档位动画 + 气泡）：周期轮询与菜单点播共用同一展示路径，视觉/行为严格一致
   showBalanceNow(state) {
     if (!state || !state.ok) return;
@@ -895,6 +977,17 @@ class PetSprite {
   }
 
   renderBubble() {
+    // 碎碎念气泡优先显示（若同时有余额气泡在展示，碎碎念覆盖）；两者都关时隐藏
+    if (this.whisperOn && this.whisperView) {
+      this.bubble.innerHTML = '';
+      const line = document.createElement('div');
+      line.className = 'pet-bub-row';
+      line.textContent = this.whisperView[0]?.text ?? '';
+      this.bubble.appendChild(line);
+      this.bubble.classList.add('is-on');
+      window.__dshPetDebug.lastBubbleTitle = this.bubble.textContent.slice(0, 60);
+      return;
+    }
     if (!this.bubbleOn || !this.balanceView) {
       this.bubble.classList.remove('is-on');
       window.__dshPetDebug.lastBubbleTitle = '';
@@ -958,6 +1051,9 @@ function startLoops() {
     };
     void balanceLoop();
   }
+
+  // 碎碎念：每只启用宠物独立轮询（startWhisperLoop）——各自周期、各自人设、各自一句话（与浏览器一致）
+  for (const s of sprites) s.startWhisperLoop();
 
   // 手动 /balance 触发：1s 轻量轮询触发计数（端点已禁止缓存），计数变化且余额启用时立即刷新余额并递增 tick
   let triggerBaseline = null;

@@ -73,6 +73,13 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
     const balanceEnabled = p?.balanceEnabled;
     if (typeof balanceEnabled !== 'boolean')
       throw new Error('dsh-pet: pet「' + id + '」缺少 balanceEnabled（需为布尔值 true/false）');
+    const whisperEnabled = p?.whisperEnabled;
+    if (whisperEnabled === undefined || whisperEnabled === null) {
+      console.warn(`dsh-pet: pet「${id}」缺少 whisperEnabled，已按默认 true（开启碎碎念）处理`);
+    } else if (typeof whisperEnabled !== 'boolean') {
+      throw new Error('dsh-pet: pet「' + id + '」whisperEnabled 非法（需为布尔值 true/false）');
+    }
+    const effectiveWhisper = whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled;
     const display = p?.display;
     if (display === undefined || display === null) {
       console.warn(`dsh-pet: pet「${id}」缺少 display，已按默认 both 处理`);
@@ -90,6 +97,7 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
       id,
       size,
       balanceEnabled,
+      whisperEnabled: effectiveWhisper,
       display: effectiveDisplay,
       position: { corner: corner as Corner, marginX, marginY },
     });

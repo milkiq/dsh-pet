@@ -15,7 +15,8 @@ import {
   type UserOverrides,
 } from '../shared/config';
 import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from '../shared/balance';
-import { makeBalanceBubble } from './bubble';
+import { fetchWhisperState } from '../shared/whisper';
+import { makeBalanceBubble, makeWhisperBubble } from './bubble';
 import { CANVAS_H, FEET_Y, HIT_BOX, DRAG_THRESHOLD, PET_REF_WIDTH } from '../shared/constants';
 // 统一右键菜单：与桌面共用同一份组件（树 + 渲染 + 样式，src/shared/menu.ts）
 import {
@@ -101,8 +102,10 @@ export function makePetUI(rt: {
 
   /** 余额气泡（哑组件：数据与显隐由 PetCard 传入） */
   const BalanceBubble = makeBalanceBubble({ h });
+  /** 碎碎念气泡（哑组件：文本与显隐由 PetCard 传入） */
+  const WhisperBubble = makeWhisperBubble({ h });
 
-  /** 单个宠物实例（配置由容器 PetMulti 传入） */
+  /** 单个宠物实例（配置由容器 PetMulti 传入；碎碎念轮询/触发/气泡完全自理） */
   function PetCard({ cfg, balance, balanceTick }: { cfg: Pet; balance: BalanceState | null; balanceTick: number }) {
     // ---- 尺寸（由配置传入；容器/设置页更新后即时跟随）----
     const [size, setSize] = useState(cfg.size);
@@ -125,6 +128,11 @@ export function makePetUI(rt: {
     // 余额气泡显隐（事件触发时显示，10s 后定时自动消失）
     const [bubbleOn, setBubbleOn] = useState(false);
     const bubbleTimerRef = useRef<number | null>(null);
+    // 碎碎念气泡（独立于余额气泡：文本气泡与余额行气泡互不干扰，各自 10s 显隐）
+    const [whisperBubbleOn, setWhisperBubbleOn] = useState(false);
+    const whisperBubbleTimerRef = useRef<number | null>(null);
+    // 碎碎念当前文本（本宠物独立生成的句子）
+    const [whisperText, setWhisperText] = useState<string | null>(null);
     // 右键菜单（统一自绘组件）：当前挂载的 close() 句柄，卸载/重开前清理
     const menuRef = useRef<{ close: () => void } | null>(null);
 
@@ -236,6 +244,7 @@ export function makePetUI(rt: {
     useEffect(
       () => () => {
         if (bubbleTimerRef.current !== null) window.clearTimeout(bubbleTimerRef.current);
+        if (whisperBubbleTimerRef.current !== null) window.clearTimeout(whisperBubbleTimerRef.current);
       },
       [],
     );
@@ -292,6 +301,83 @@ export function makePetUI(rt: {
       setAnim(name);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [balanceTick]);
+
+    // 碎碎念：本宠物独立轮询 /whisper?pet=<id> —— host 按宠物独立生成（用本种类人设）、按宠物节流。
+    // 首拉仅记基线（不触发，避免页面加载/刷新时重放）；之后 ts 变化（本宠物新周期的新句）才触发动画+气泡；
+    // 失败/未配置静默跳过（不弹错误气泡）。每只宠物独立轮询 = 各自周期、各自人设、各自一句话。
+    const whisperTextRef = useRef<string | null>(null);
+    const prevWhisperTsRef = useRef(0);
+    useEffect(() => {
+      if (!cfg.whisperEnabled) return; // 未启用碎碎念 -> 该宠物对碎碎念事件完全免疫
+      let alive = true;
+      let hasBaseline = false;
+      const refresh = async () => {
+        try {
+          const state = await fetchWhisperState('/dsh-pet-7340/whisper?pet=' + encodeURIComponent(cfg.id));
+          if (!alive) return;
+          if (state.ok) {
+            if (!hasBaseline) {
+              hasBaseline = true; // 首次仅记基线：避免启动/刷新时重放历史事件
+              prevWhisperTsRef.current = state.ts;
+              whisperTextRef.current = state.text;
+              return;
+            }
+            if (state.ts !== prevWhisperTsRef.current) {
+              prevWhisperTsRef.current = state.ts;
+              whisperTextRef.current = state.text;
+              triggerWhisper(state.text);
+            }
+          } else {
+            console.warn(
+              '[dsh-pet] 碎碎念生成失败 pet=' +
+                cfg.id +
+                ' reason=' +
+                state.reason +
+                (state.message ? ' ' + state.message : ''),
+            );
+          }
+        } catch (e) {
+          if (alive) console.warn('[dsh-pet] 碎碎念拉取异常 pet=' + cfg.id, e);
+        }
+      };
+      void refresh();
+      const intervalMs = Math.max(1000, (config.eventsRefreshSec?.whisper ?? 3600) * 1000);
+      const timer = window.setInterval(() => void refresh(), intervalMs);
+      return () => {
+        alive = false;
+        window.clearInterval(timer);
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [cfg.id, cfg.whisperEnabled]);
+
+    // 碎碎念触发（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（10s 消失，与动画解耦）
+    const triggerWhisper = (text: string) => {
+      const pool = petAnims.events?.whisper;
+      if (!pool || pool.length === 0) {
+        console.error('[dsh-pet] 配置缺少 animations.events.whisper，无法播放碎碎念动画');
+        return;
+      }
+      const name = pool[Math.floor(Math.random() * pool.length)];
+      console.log(
+        '[dsh-pet] ' +
+          new Date().toTimeString().slice(0, 8) +
+          ' whisper pet=' +
+          cfg.id +
+          ' -> [' +
+          name +
+          '] 「' +
+          text +
+          '」',
+      );
+      stopMove();
+      setWhisperText(text);
+      setWhisperBubbleOn(true);
+      // 气泡 10s 定时消失（与动画解耦；重复触发先清旧定时器）
+      if (whisperBubbleTimerRef.current !== null) window.clearTimeout(whisperBubbleTimerRef.current);
+      whisperBubbleTimerRef.current = window.setTimeout(() => setWhisperBubbleOn(false), BUBBLE_DURATION_MS);
+      setOnce(true);
+      setAnim(name);
+    };
     useEffect(() => {
       const onResize = () => setCustomPos((prev) => (prev ? { ...prev } : prev));
       window.addEventListener('resize', onResize);
@@ -823,6 +909,8 @@ export function makePetUI(rt: {
       children: [
         // 余额气泡（仅启用余额功能的宠物渲染；显示与否由 bubbleOn 控制）
         balance && balance.ok && cfg.balanceEnabled ? h(BalanceBubble, { state: balance, on: bubbleOn }) : null,
+        // 碎碎念气泡（仅启用碎碎念的宠物渲染；显示与否由 whisperBubbleOn 控制）
+        whisperText && cfg.whisperEnabled ? h(WhisperBubble, { text: whisperText, on: whisperBubbleOn }) : null,
         h('div', {
           ref: stageRef,
           className: 'dsh-pet-stage',
@@ -846,6 +934,8 @@ export function makePetUI(rt: {
     // 余额状态（容器统一拉取，PetCard 共享；balanceTick 每次成功拉取递增，驱动事件动画）
     const [balance, setBalance] = useState<BalanceState | null>(null);
     const [balanceTick, setBalanceTick] = useState(0);
+    // 碎碎念：轮询下沉到每只 PetCard（各自按自己的周期拉取 /whisper?pet=<id>，人设/文本/触发全部独立），
+    // 容器不再持有共享状态——与「每只宠物单独触发对话」的产品语义一致。
 
     useEffect(() => {
       let alive = true;
@@ -936,7 +1026,6 @@ export function makePetUI(rt: {
         window.clearInterval(timer);
       };
     }, [ready, anyBalanceEnabled]);
-
     // 手动 /balance 触发：1s 轻量轮询触发计数（host 端点响应头已禁止缓存），
     // 计数变化且余额启用时立即刷新余额并递增 balanceTick（与周期轮询同一触发路径）
     useEffect(() => {

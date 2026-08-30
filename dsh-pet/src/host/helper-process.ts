@@ -85,12 +85,7 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
             join(userProfile, 'Applications', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
             join('/usr/local/lib/node_modules/electron/dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
           ]
-        : [
-            dshElectron,
-            '/usr/local/bin/electron',
-            '/usr/bin/electron',
-            '/opt/electron/electron',
-          ];
+        : [dshElectron, '/usr/local/bin/electron', '/usr/bin/electron', '/opt/electron/electron'];
   for (const candidate of localCandidates) push(candidate);
   if (process.env.ELECTRON_PATH) push(process.env.ELECTRON_PATH);
   return list.find((value) => existsSync(value));
@@ -142,7 +137,14 @@ export interface EnsureElectronOptions {
  *  win32：electron.exe + 散文件；darwin：Electron.app 关键结构；linux：electron 单文件。 */
 const REQUIRED_FILES =
   PLAT === 'win32'
-    ? ['electron.exe', 'icudtl.dat', 'resources.pak', 'snapshot_blob.bin', 'chrome_100_percent.pak', 'v8_context_snapshot.bin']
+    ? [
+        'electron.exe',
+        'icudtl.dat',
+        'resources.pak',
+        'snapshot_blob.bin',
+        'chrome_100_percent.pak',
+        'v8_context_snapshot.bin',
+      ]
     : PLAT === 'darwin'
       ? [
           ELECTRON_REL, // Electron.app/Contents/MacOS/Electron

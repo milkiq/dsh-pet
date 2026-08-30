@@ -3,6 +3,7 @@
 // 内容（文案/档位/数学）来自 src/shared/balance.ts 的 balanceBubbleView ——
 // 与桌面模式共用同一份行数据，本文件只负责把行数据映射成 React 节点。
 import { balanceBubbleView, type BalanceBubbleRow, type BalanceState } from '../shared/balance';
+import { whisperBubbleView } from '../shared/whisper';
 import type { ReactNode } from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
@@ -88,6 +89,24 @@ export function makeBalanceBubble(rt: { h: typeof jsx }): (props: { state: Balan
 
   return function BalanceBubble({ state, on }: { state: BalanceState; on: boolean }) {
     const rows = balanceBubbleView(state);
+    return h('div', {
+      className: 'dsh-pet-bubble' + (on ? ' is-on' : ''),
+      children: rowsToNodes(h, rows),
+    });
+  };
+}
+
+/**
+ * 制造碎碎念气泡（工厂）。
+ * 与余额气泡共用同一套样式（dsh-pet-bubble）与行渲染（rowsToNodes）；
+ * 内容来自 src/shared 的 whisperBubbleView（与桌面模式完全一致）。
+ */
+export function makeWhisperBubble(rt: { h: typeof jsx }): (props: { text: string; on: boolean }) => ReactNode {
+  const { h } = rt;
+  injectBubbleCss();
+
+  return function WhisperBubble({ text, on }: { text: string; on: boolean }) {
+    const rows = whisperBubbleView({ ok: true, text, ts: 0 });
     return h('div', {
       className: 'dsh-pet-bubble' + (on ? ' is-on' : ''),
       children: rowsToNodes(h, rows),

@@ -46,6 +46,8 @@ export const zh = {
   sizeHint: '高度自动 = 宽度 × 9/16。',
   balanceEnabled: '余额功能',
   balanceEnabledHint: '启用后该宠物触发余额动画并显示余额气泡。',
+  whisperEnabled: '碎碎念',
+  whisperEnabledHint: '启用后该宠物按周期用 AI 生成一句话并播碎碎念动画（人设与周期在配置文件顶层）。',
   displayLabel: '显示位置',
   displayHint: 'web=仅浏览器 / desktop=仅桌面 / both=两者都显示 / none=都不显示',
   'display.web': '仅浏览器',
@@ -100,6 +102,9 @@ export const en = {
   sizeHint: 'Height is automatic = width × 9/16.',
   balanceEnabled: 'Balance',
   balanceEnabledHint: 'When enabled, this pet plays balance animations and shows the balance bubble.',
+  whisperEnabled: 'Whisper',
+  whisperEnabledHint:
+    'When enabled, this pet periodically generates a line via AI and plays the whisper animation (persona & interval live in the top-level config).',
   displayLabel: 'Display',
   displayHint: 'web = browser only / desktop = desktop only / both = both / none = neither',
   'display.web': 'Browser only',
@@ -371,7 +376,14 @@ export function makePetConfigSection(rt: {
       const id = nextId(pets);
       setPets((list) => [
         ...list,
-        { id, size: tpl.size, balanceEnabled: tpl.balanceEnabled, display: tpl.display, position: { ...tpl.position } },
+        {
+          id,
+          size: tpl.size,
+          balanceEnabled: tpl.balanceEnabled,
+          whisperEnabled: tpl.whisperEnabled,
+          display: tpl.display,
+          position: { ...tpl.position },
+        },
       ]);
       setSelId(id);
     };
@@ -583,6 +595,29 @@ export function makePetConfigSection(rt: {
                     h('span', {
                       style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
                       children: t('balanceEnabledHint'),
+                    }),
+                  ],
+                }),
+                h('label', {
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    fontSize: '12px',
+                    color: 'var(--dsw-alias-label-secondary)',
+                  },
+                  children: [
+                    t('whisperEnabled'),
+                    h('input', {
+                      type: 'checkbox',
+                      checked: !!cur.whisperEnabled,
+                      disabled: busy,
+                      onChange: (e: ChangeEvent<HTMLInputElement>) => updateSel({ whisperEnabled: e.target.checked }),
+                      style: { width: '16px', height: '16px', accentColor: 'var(--dsw-alias-state-business-primary)' },
+                    }),
+                    h('span', {
+                      style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
+                      children: t('whisperEnabledHint'),
                     }),
                   ],
                 }),

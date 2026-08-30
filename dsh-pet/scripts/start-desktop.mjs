@@ -35,7 +35,11 @@ const electronRel =
 const candidates = [
   process.env.DSH_PET_ELECTRON_PATH,
   process.env.ELECTRON_PATH,
-  join(process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.dsh'), 'electron', electronRel),
+  join(
+    process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.dsh'),
+    'electron',
+    electronRel,
+  ),
 ];
 const electron = candidates.find((value) => value && existsSync(value));
 if (!electron) {

@@ -36,12 +36,13 @@ import { fileURLToPath } from 'node:url';
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { queryBalance } from './balance';
+import { generateWhisper } from './whisper';
 import { HelperProcess, defaultElectronExe, ensureElectronDownload, resolveElectronPath } from './helper-process';
 
 /** 插件行 id（与 cordis.patch.yml 一致） */
 export const name = 'pet';
-/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前服务商）+ credentials（凭证）+ commands（/balance 斜杠命令） */
-export const inject = ['webServer', 'agentDefaultModel', 'credentials', 'commands'];
+/** 需要注入的服务：webServer（路由）+ agentDefaultModel（当前服务商）+ credentials（凭证）+ llm（对话模型调用）+ commands（/balance 斜杠命令） */
+export const inject = ['webServer', 'agentDefaultModel', 'credentials', 'llm', 'commands'];
 
 /** 本包目录：宿主构建产物位于 lib/，其上一级即包根。 */
 const PACKAGE_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -150,6 +151,8 @@ function sanitizeUserConfig(raw: unknown): { pets: unknown[]; notificationsEnabl
     if (!Number.isFinite(size) || size <= 0) return null;
     const balanceEnabled = pp.balanceEnabled;
     if (typeof balanceEnabled !== 'boolean') return null;
+    const whisperEnabled = pp.whisperEnabled;
+    if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') return null;
     const display = String(pp.display ?? '');
     if (!PET_DISPLAY_SET.has(display)) return null; // display 必填四值之一，缺失即配置错误
     const pos = pp.position && typeof pp.position === 'object' ? (pp.position as Record<string, unknown>) : {};
@@ -158,7 +161,7 @@ function sanitizeUserConfig(raw: unknown): { pets: unknown[]; notificationsEnabl
     const marginX = Number(pos.marginX);
     const marginY = Number(pos.marginY);
     if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) return null;
-    out.push({ id, size, balanceEnabled, display, position: { corner, marginX, marginY } });
+    out.push({ id, size, balanceEnabled, whisperEnabled, display, position: { corner, marginX, marginY } });
   }
   const ne = o.notificationsEnabled;
   if (ne !== undefined && typeof ne !== 'boolean') return null;
@@ -224,10 +227,13 @@ interface ExtraPetValidated {
   id: string;
   size: number;
   balanceEnabled: boolean;
+  whisperEnabled: boolean;
   display: string;
   position: { corner: string; marginX: number; marginY: number };
   /** 素材根（= 配置文件前缀 `<名>`，即 `pet/<名>-animation/`）：多实例共享同一素材目录 */
   assetRoot: string;
+  /** 种类级人设提示词（顶层 whisperPrompt，与主配置同字段）：缺失回落全局，非法字符串报错 */
+  whisperPrompt?: string;
   animations: unknown;
   animationWeights: unknown;
 }
@@ -248,6 +254,11 @@ function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValida
   // ---- animations / animationWeights（完整校验，与主配置同一套规则）----
   assertAnimationsHost(cfg.animations);
   assertWeightsHost(cfg.animationWeights);
+  // ---- 种类级人设提示词（顶层 whisperPrompt，与主配置同字段；非字符串非法、缺失回落全局）----
+  const whisperPrompt = cfg.whisperPrompt;
+  if (whisperPrompt !== undefined && (typeof whisperPrompt !== 'string' || whisperPrompt.length === 0)) {
+    throw new Error('whisperPrompt 非法（需非空字符串）');
+  }
   // ---- pets（数组非空；数组内 id 唯一 + 逐只完整校验）----
   const petsArr = cfg.pets;
   if (!Array.isArray(petsArr) || !petsArr.length) throw new Error('缺少 pets');
@@ -261,6 +272,9 @@ function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValida
     if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
     const balanceEnabled = pet?.balanceEnabled;
     if (typeof balanceEnabled !== 'boolean') throw new Error(`pet「${id}」缺少 balanceEnabled`);
+    const whisperEnabled = pet?.whisperEnabled;
+    if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean')
+      throw new Error(`pet「${id}」whisperEnabled 非法（需布尔值 true/false）`);
     const display = String(pet?.display ?? '');
     if (!PET_DISPLAY_SET.has(display)) throw new Error(`pet「${id}」display 非法（需 web/desktop/both/none）`);
     const pos =
@@ -275,9 +289,11 @@ function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValida
       id,
       size,
       balanceEnabled,
+      whisperEnabled: whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled,
       display,
       position: { corner, marginX, marginY },
       assetRoot,
+      whisperPrompt,
       animations: cfg.animations,
       animationWeights: cfg.animationWeights,
     });
@@ -352,6 +368,9 @@ export function apply(ctx: any): void {
   const thumbUserRoot = join(userRoot, 'main-animation');
   // 手动触发计数：/balance 命令 +1，两边（浏览器/桌面）同样的 1s 轮询检测变化后刷新余额（进程内内存态，重启归零）
   let balanceTriggerCount = 0;
+  // 碎碎念生成缓存（按宠物独立）：每只启用的宠物在自己的周期内返回同一句（ts 不变），
+  // 同宠物的多个端共享一句、避免重复 LLM 调用（进程内内存态，重启清空）
+  const whisperCache = new Map<string, { text: string; ts: number }>();
 
   // 桌面宠物 = display 含 desktop 的第一只（桌面窗口会渲染全部 desktop/both 宠物，
   // 这里只需判定「是否存在」以决定是否拉起 Helper；大小由宠物自己的配置决定，宿主不再传）。
@@ -370,7 +389,13 @@ export function apply(ctx: any): void {
         throw new Error(`pet「${id}」display 非法（需 web/desktop/both/none 之一）`);
       }
       const effectiveDisplay: string = display === undefined || display === null ? 'both' : String(display);
-      return { ...pet, display: effectiveDisplay };
+      // 碎碎念开关：缺失按默认 true（开启）处理并警告；写了但非法仍报错
+      const whisperEnabled = pet?.whisperEnabled;
+      if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') {
+        throw new Error(`pet「${id}」whisperEnabled 非法（需布尔值 true/false）`);
+      }
+      const effectiveWhisper: boolean = whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled;
+      return { ...pet, display: effectiveDisplay, whisperEnabled: effectiveWhisper };
     });
 
   /** 主宠物列表：用户层（main-config.json）优先，否则包内 config.jsonc */
@@ -389,6 +414,52 @@ export function apply(ctx: any): void {
     const raw = JSON.parse(stripJsonc(readFileSync(cfgFile, 'utf8'))) as Record<string, unknown>;
     if (!Array.isArray(raw.pets) || raw.pets.length === 0) throw new Error('config.jsonc 缺少 pets');
     return validatePets(raw.pets);
+  };
+
+  /** 合并配置顶层字段（用户层 main-config.json 优先 → 包内 config.jsonc 回落）：
+   *  碎碎念用（whisperPrompt 人设 + eventsRefreshSec.whisper 周期）。 */
+  const readMergedConfig = (): Record<string, unknown> => {
+    let merged: Record<string, unknown> = {};
+    try {
+      merged = JSON.parse(stripJsonc(readFileSync(join(PACKAGE_ROOT, 'assets', 'config.jsonc'), 'utf8'))) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      /* 包内配置缺失：维持空对象，调用方回落默认 */
+    }
+    if (existsSync(userConfigPath)) {
+      try {
+        const user = JSON.parse(readFileSync(userConfigPath, 'utf8')) as Record<string, unknown>;
+        if (user.whisperPrompt !== undefined) merged.whisperPrompt = user.whisperPrompt;
+        if (user.eventsRefreshSec !== undefined) merged.eventsRefreshSec = user.eventsRefreshSec;
+      } catch {
+        /* 用户配置非法：忽略，保持包内默认 */
+      }
+    }
+    return merged;
+  };
+
+  /** 读取某只宠物的种类人设：从有效宠物列表找到该实例的 assetRoot（多实例共享种类文件），
+   *  再读 pet/<assetRoot>-config.json 顶层 whisperPrompt；非文件宠物/缺失返回 undefined（回落全局）。 */
+  const readPetWhisperPrompt = (petId: string): string | undefined => {
+    let assetRoot: string | undefined;
+    try {
+      const eff = readEffectivePets();
+      const found = eff.find((p) => String(p.id) === petId);
+      assetRoot = found ? String((found as { assetRoot?: unknown }).assetRoot ?? '') : '';
+    } catch {
+      return undefined; // 有效宠物列表解析失败：回落全局人设
+    }
+    if (!assetRoot) return undefined;
+    const file = join(userRoot, 'pet', assetRoot + '-config.json');
+    if (!existsSync(file)) return undefined;
+    try {
+      const raw = JSON.parse(stripJsonc(readFileSync(file, 'utf8'))) as Record<string, unknown>;
+      return typeof raw.whisperPrompt === 'string' && raw.whisperPrompt ? raw.whisperPrompt : undefined;
+    } catch {
+      return undefined; // 配置解析失败：回落全局人设
+    }
   };
 
   /**
@@ -622,6 +693,48 @@ export function apply(ctx: any): void {
               'content-length': Buffer.byteLength(body),
             });
             res.end(body);
+            return;
+          }
+
+          // 碎碎念生成：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
+          // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**自己种类的人设**生成一句话
+          // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = 合并配置顶层 whisperPrompt）。
+          // 节流/缓存按 pet 分开：同一宠物周期内重复请求返回同一句（ts 不变，client 检测变化才触发），
+          // 同一宠物的多个端（浏览器+桌面窗口）共享一句，不重复调 LLM。
+          if (rest === 'whisper') {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'method not allowed' });
+              return;
+            }
+            try {
+              const petId = String(url.searchParams.get('pet') ?? '');
+              const merged = readMergedConfig();
+              const ers = merged.eventsRefreshSec as Record<string, unknown> | undefined;
+              const intervalSec = ers && typeof ers.whisper === 'number' ? ers.whisper : 3600;
+              // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层
+              const system =
+                (petId ? readPetWhisperPrompt(petId) : undefined) ??
+                (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+              const now = Date.now();
+              const cached = whisperCache.get(petId);
+              if (cached && now - cached.ts < intervalSec * 1000) {
+                sendJson(res, 200, { ok: true, text: cached.text, ts: cached.ts });
+                return;
+              }
+              const result = await generateWhisper(ctx, system);
+              if (!result.ok) {
+                sendJson(res, 200, { ok: false, reason: result.reason, message: result.message });
+                return;
+              }
+              whisperCache.set(petId, { text: result.text, ts: now });
+              sendJson(res, 200, { ok: true, text: result.text, ts: now });
+            } catch (e) {
+              sendJson(res, 200, {
+                ok: false,
+                reason: 'generate-error',
+                message: e instanceof Error ? e.message : String(e),
+              });
+            }
             return;
           }
 
