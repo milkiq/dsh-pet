@@ -29,8 +29,9 @@ export interface MenuLeaf {
   label: string;
   /** 播放的动画名（点播动作）；action 优先于 anim */
   anim?: string;
-  /** 自定义动作：open-site=打开网站 / show-balance=查看余额；whisper=立即碎碎念一句（手动触发）；home=回到初始位置（两端共用） */
-  action?: 'open-site' | 'show-balance' | 'whisper' | 'home';
+  /** 自定义动作：open-site=打开网站 / show-balance=查看余额；whisper=立即碎碎念一句；
+   * chat=打开对话弹窗；home=回到初始位置。手动触发均不受 whisperEnabled 影响（该字段只关自动周期轮询） */
+  action?: 'open-site' | 'show-balance' | 'whisper' | 'chat' | 'home';
 }
 
 /** 分支：带子菜单的项 */

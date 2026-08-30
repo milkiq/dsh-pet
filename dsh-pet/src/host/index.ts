@@ -37,6 +37,7 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths';
 import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { queryBalance } from './balance';
 import { generateWhisper } from './whisper';
+import { generateChat, type ChatMemoryMessage } from './chat';
 import { HelperProcess, defaultElectronExe, ensureElectronDownload, resolveElectronPath } from './helper-process';
 
 /** 插件行 id（与 cordis.patch.yml 一致） */
@@ -372,6 +373,53 @@ export function apply(ctx: any): void {
   // 同宠物的多个端共享一句、避免重复 LLM 调用（进程内内存态，重启清空）
   const whisperCache = new Map<string, { text: string; ts: number }>();
 
+  // 对话记忆文件（唯一读写方 = 本进程；浏览器/桌面两端都只是客户端 → 同一实例天然共享同一份记忆）。
+  // 结构双层：{ <种类桶 assetRoot ?? petId>: { <实例 id>: { messages: ChatMemoryMessage[] } } }
+  const memoryPath = join(userRoot, 'memory.json');
+  // 对话写操作串行队列：read-modify-write 排队执行，防两端同时对话时交错写盘
+  let chatQueue: Promise<void> = Promise.resolve();
+
+  /** 读记忆文件：不存在 → 空；损坏 → 显式报错 + 备份原始文件（绝不静默丢数据）+ 重建空记忆 */
+  const readMemory = async (): Promise<Record<string, Record<string, { messages: ChatMemoryMessage[] }>>> => {
+    let raw: string;
+    try {
+      raw = await readFile(memoryPath, 'utf8');
+    } catch {
+      return {}; // 文件不存在 = 尚无记忆
+    }
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== 'object') throw new Error('not an object');
+      return parsed as Record<string, Record<string, { messages: ChatMemoryMessage[] }>>;
+    } catch (e) {
+      console.error(
+        `dsh-pet: 记忆文件损坏已备份（对话将从头开始）：${memoryPath}（${e instanceof Error ? e.message : String(e)}）`,
+      );
+      try {
+        await mkdir(userRoot, { recursive: true });
+        await writeFile(`${memoryPath}.bak-${Date.now()}`, raw, 'utf8');
+      } catch {
+        /* 备份失败仅告警，不阻断 */
+      }
+      return {};
+    }
+  };
+
+  const writeMemory = async (mem: Record<string, Record<string, { messages: ChatMemoryMessage[] }>>): Promise<void> => {
+    await mkdir(userRoot, { recursive: true });
+    await writeFile(memoryPath, JSON.stringify(mem, null, 2), 'utf8');
+  };
+
+  /** 把一次读写封进串行队列（同进程内防交错），返回 fn 的结果 */
+  const withMemoryLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = chatQueue.then(fn, fn);
+    chatQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   /** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
    *  按宠物独立生成（文件宠物用自己种类的人设），缓存按 pet 分开；
    *  force=false 走周期节流（缓存期内返回同一句 ts），force=true 强制新生成并刷新缓存
@@ -488,6 +536,44 @@ export function apply(ctx: any): void {
     } catch {
       return undefined; // 配置解析失败：回落全局人设
     }
+  };
+
+  /** 某宠物的种类桶（= assetRoot，多实例共享）；非文件宠物（主宠物）回落实例 id 本身 */
+  const petAssetRoot = (petId: string): string | undefined => {
+    try {
+      const found = readEffectivePets().find((p) => String(p.id) === petId);
+      return found ? String((found as { assetRoot?: unknown }).assetRoot ?? '') || petId : petId;
+    } catch {
+      return petId; // 列表解析失败：按实例 id 独立成桶
+    }
+  };
+
+  /** 对话记忆轮数（一次请求携带的历史轮数，1 轮 = 1 问 1 答）：
+   *  回落链同 whisperPrompt —— 种类文件 pet/<名>-config.json 顶层 → 合并配置顶层 → 默认 5；
+   *  缺失静默默认（兼容旧配置），写了非法（非负数字）才显式报错。 */
+  const resolveMemoryRounds = (petId: string, merged: Record<string, unknown>): number => {
+    let fromKind: unknown;
+    const assetRoot = petAssetRoot(petId);
+    if (assetRoot) {
+      const file = join(userRoot, 'pet', assetRoot + '-config.json');
+      if (existsSync(file)) {
+        try {
+          const raw = JSON.parse(stripJsonc(readFileSync(file, 'utf8'))) as Record<string, unknown>;
+          fromKind = raw.chatMemoryRounds;
+        } catch {
+          /* 种类配置解析失败：回落全局 */
+        }
+      }
+    }
+    const value = fromKind !== undefined ? fromKind : merged.chatMemoryRounds;
+    if (value !== undefined) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new Error('chatMemoryRounds 非法（需非负数字，或省略用默认 5）');
+      }
+      return Math.floor(n);
+    }
+    return 5;
   };
 
   /**
@@ -762,6 +848,71 @@ export function apply(ctx: any): void {
               sendJson(res, 200, {
                 ok: false,
                 reason: 'generate-error',
+                message: e instanceof Error ? e.message : String(e),
+              });
+            }
+            return;
+          }
+
+          // 对话：/dsh-pet-7340/chat?pet=<id>
+          //   GET  —— 最近记忆窗口（截尾 chatMemoryRounds 轮），弹窗打开时展示
+          //   POST —— 携带历史生成回复并写入记忆（{text} → {ok, reply, ts}）
+          // 记忆唯一读写方 = host（memory.json；浏览器/桌面两端都只是客户端）→
+          // 同一实例的浏览器与桌面天然共享同一份记忆；文件全存不删，
+          // 请求只截尾部 chatMemoryRounds 轮（1 轮 = 1 问 1 答；种类→全局→默认 5）。
+          if (rest === 'chat') {
+            const petId = String(url.searchParams.get('pet') ?? '');
+            try {
+              if (req.method === 'GET') {
+                const mem = await readMemory();
+                const bucket = mem[petAssetRoot(petId) ?? petId] ?? {};
+                const list = (bucket[petId]?.messages ?? []).slice();
+                const rounds = resolveMemoryRounds(petId, readMergedConfig());
+                sendJson(res, 200, { ok: true, messages: list.slice(-rounds * 2), rounds });
+                return;
+              }
+              if (req.method === 'POST') {
+                const body = (JSON.parse(await readBody(req)) as Record<string, unknown>) ?? {};
+                const text = typeof body.text === 'string' ? body.text.trim() : '';
+                if (!text) {
+                  sendJson(res, 200, { ok: false, reason: 'bad-request', message: '消息为空' });
+                  return;
+                }
+                if (text.length > 2000) {
+                  sendJson(res, 200, { ok: false, reason: 'bad-request', message: '消息过长（限 2000 字）' });
+                  return;
+                }
+                const result = await withMemoryLock(async () => {
+                  const merged = readMergedConfig();
+                  const rounds = resolveMemoryRounds(petId, merged);
+                  // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链）
+                  const system =
+                    (petId ? readPetWhisperPrompt(petId) : undefined) ??
+                    (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+                  const mem = await readMemory();
+                  const bucketKey = petAssetRoot(petId) ?? petId;
+                  const bucket = (mem[bucketKey] ??= {});
+                  const entry = (bucket[petId] ??= { messages: [] });
+                  const list = entry.messages.slice().slice(-rounds * 2);
+                  const generated = await generateChat(ctx, system, list, text);
+                  if (!generated.ok) return generated;
+                  const now = Date.now();
+                  entry.messages.push({ role: 'user', content: text, ts: now });
+                  entry.messages.push({ role: 'assistant', content: generated.text, ts: now });
+                  await writeMemory(mem);
+                  return { ok: true as const, reply: generated.text, ts: now };
+                });
+                sendJson(res, 200, result);
+                return;
+              }
+              sendJson(res, 405, { error: 'method not allowed' });
+              return;
+            } catch (e) {
+              // 配置非法（chatMemoryRounds 等）→ config-error；其余（LLM/IO）→ generate-error
+              const isConfig = e instanceof Error && /chatMemoryRounds/.test(String(e.message));
+              sendJson(res, 200, {
+                ok: false,
+                reason: isConfig ? 'config-error' : 'generate-error',
                 message: e instanceof Error ? e.message : String(e),
               });
             }

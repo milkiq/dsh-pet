@@ -81,8 +81,9 @@ function createPetWindows() {
       skipTaskbar: true,
       resizable: false,
       hasShadow: false,
-      // 永不被激活：避免在浏览器视频上方形成"激活窗口"（黑屏防护的组成之一）
-      focusable: false,
+      // 可聚焦：对话输入框/菜单需要窗口焦点才能打字（focusable:false 会让输入框永远无法聚焦）；
+      // 平时整窗穿透（setIgnoreMouseEvents）不抢焦点，黑屏防护由「每宠一个小窗口」解决，与此无关
+      focusable: true,
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,

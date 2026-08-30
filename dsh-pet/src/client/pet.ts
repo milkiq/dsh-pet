@@ -27,6 +27,8 @@ import {
   type MenuLeaf,
   type MenuNode,
 } from '../shared/menu';
+// 对话弹窗：与桌面共用同一份组件（数据经 host /chat 读写同一份记忆）
+import { mountChatDialog } from '../shared/chat';
 import { petBridge } from './settings';
 // 拖拽抛掷物理（弹簧跟手 + 甩抛 + 重力反弹）：两端共用同一份纯计算（src/shared/physics.ts）
 import {
@@ -135,6 +137,8 @@ export function makePetUI(rt: {
     const [whisperText, setWhisperText] = useState<string | null>(null);
     // 右键菜单（统一自绘组件）：当前挂载的 close() 句柄，卸载/重开前清理
     const menuRef = useRef<{ close: () => void } | null>(null);
+    // 对话弹窗（与桌面共用 shared 组件）：当前挂载的 close() 句柄，卸载/重开前清理
+    const chatRef = useRef<{ close: () => void } | null>(null);
 
     // 配置变化即时跟随（容器重新合并 / 设置页保存后通过 petBridge.sync 触发）
     useEffect(() => {
@@ -248,12 +252,16 @@ export function makePetUI(rt: {
       },
       [],
     );
-    // 卸载时关闭可能开着的右键菜单（挂载的 DOM 一并清理）
+    // 卸载时关闭可能开着的右键菜单与对话弹窗（挂载的 DOM 一并清理）
     useEffect(
       () => () => {
         if (menuRef.current) {
           menuRef.current.close();
           menuRef.current = null;
+        }
+        if (chatRef.current) {
+          chatRef.current.close();
+          chatRef.current = null;
         }
       },
       [],
@@ -829,6 +837,29 @@ export function makePetUI(rt: {
           .catch((e) => console.warn('[dsh-pet] 碎碎念手动触发异常', e));
         return;
       }
+      if (leaf.action === 'chat') {
+        // 对话：最简输入框（shared 组件，与桌面同一份）——回车发送后弹窗消失，
+        // 回复用**碎碎念同款显示**（说话动画 + 白色气泡 10s），只多一步用户输入。
+        // 记忆经 host /chat 读写（memory.json，浏览器/桌面同一实例共享同一份记忆）。
+        // 弹窗跟随宠物：基准是**身体命中区**（.dsh-pet-hit，与气泡同一定位源——
+        // 桌宠在视频中间，视频框右上角 ≠ 宠物右上角），取身体右上角，超出视口自动夹回。
+        if (chatRef.current) chatRef.current.close();
+        const hitRect = stageRef.current?.querySelector('.dsh-pet-hit')?.getBoundingClientRect();
+        chatRef.current = mountChatDialog({
+          petId: cfg.id,
+          baseUrl: '/dsh-pet-7340/chat',
+          x: hitRect ? hitRect.right + 6 : window.innerWidth - 256,
+          y: hitRect ? hitRect.top + 6 : 8,
+          onReply: (reply) => {
+            console.info('[dsh-pet] 对话回复 pet=' + cfg.id + '「' + reply + '」');
+            triggerWhisper(reply); // 复用碎碎念链路：随机说话动画 + 气泡 10s 消失
+          },
+          onClose: () => {
+            chatRef.current = null;
+          },
+        });
+        return;
+      }
       if (leaf.action === 'home') {
         // 回到初始位置：停漫游/移动/抛掷，清掉拖拽/漫游留下的会话位置，回配置角落
         stopThrow();
@@ -860,6 +891,7 @@ export function makePetUI(rt: {
       // 回到初始位置，两端共用）+ 动作树（动作→分类→具体动画）
       const tree: MenuNode[] = [
         { label: '碎碎念', action: 'whisper' },
+        { label: '对话', action: 'chat' },
         { label: '回到初始位置', action: 'home' },
         ...buildMenuTree(petAnims),
       ];
@@ -931,8 +963,10 @@ export function makePetUI(rt: {
       children: [
         // 余额气泡（仅启用余额功能的宠物渲染；显示与否由 bubbleOn 控制）
         balance && balance.ok && cfg.balanceEnabled ? h(BalanceBubble, { state: balance, on: bubbleOn }) : null,
-        // 碎碎念气泡（仅启用碎碎念的宠物渲染；显示与否由 whisperBubbleOn 控制）
-        whisperText && cfg.whisperEnabled ? h(WhisperBubble, { text: whisperText, on: whisperBubbleOn }) : null,
+        // 碎碎念/对话气泡：**不受 whisperEnabled 限制**（该字段只关自动周期轮询的触发，
+        // 见上头 useEffect 的 319 行门控）；whisperText 只由 triggerWhisper 设置——
+        // 自动轮询被门控后不会触发，所以这里任何说话气泡（碎碎念/对话回复）都照常渲染
+        whisperText ? h(WhisperBubble, { text: whisperText, on: whisperBubbleOn }) : null,
         h('div', {
           ref: stageRef,
           className: 'dsh-pet-stage',
