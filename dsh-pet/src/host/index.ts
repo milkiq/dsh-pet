@@ -150,6 +150,12 @@ function sanitizeUserConfig(raw: unknown): { pets: unknown[]; notificationsEnabl
     if (!id || id.length > 64 || /[\\/:\x00-\x1f]/.test(id)) return null;
     const size = Number(pp.size);
     if (!Number.isFinite(size) || size <= 0) return null;
+    // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
+    let name = typeof pp.name === 'string' ? pp.name.trim() : '';
+    if (!name) {
+      console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
+      name = id;
+    }
     const balanceEnabled = pp.balanceEnabled;
     if (typeof balanceEnabled !== 'boolean') return null;
     const whisperEnabled = pp.whisperEnabled;
@@ -162,7 +168,7 @@ function sanitizeUserConfig(raw: unknown): { pets: unknown[]; notificationsEnabl
     const marginX = Number(pos.marginX);
     const marginY = Number(pos.marginY);
     if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) return null;
-    out.push({ id, size, balanceEnabled, whisperEnabled, display, position: { corner, marginX, marginY } });
+    out.push({ id, name, size, balanceEnabled, whisperEnabled, display, position: { corner, marginX, marginY } });
   }
   const ne = o.notificationsEnabled;
   if (ne !== undefined && typeof ne !== 'boolean') return null;
@@ -226,6 +232,8 @@ function assertWeightsHost(w: unknown): void {
 /** 额外宠物配置的校验结果（raw 完整声明，含 animations / animationWeights / assetRoot） */
 interface ExtraPetValidated {
   id: string;
+  /** 显示名（可重复）：与主宠物同一规则——缺失/留空按该宠物 id 处理并告警 */
+  name: string;
   size: number;
   balanceEnabled: boolean;
   whisperEnabled: boolean;
@@ -269,6 +277,12 @@ function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValida
     const pet = rawPet as Record<string, unknown> | null;
     const id = String(pet?.id ?? '');
     if (!id || seen.has(id)) throw new Error('pet id 非法或重复「' + id + '」');
+    // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
+    let name = typeof pet?.name === 'string' ? pet.name.trim() : '';
+    if (!name) {
+      console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
+      name = id;
+    }
     const size = Number(pet?.size);
     if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
     const balanceEnabled = pet?.balanceEnabled;
@@ -288,6 +302,7 @@ function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValida
     seen.add(id);
     out.push({
       id,
+      name,
       size,
       balanceEnabled,
       whisperEnabled: whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled,
@@ -431,10 +446,8 @@ export function apply(ctx: any): void {
     const merged = readMergedConfig();
     const ers = merged.eventsRefreshSec as Record<string, unknown> | undefined;
     const intervalSec = ers && typeof ers.whisper === 'number' ? ers.whisper : 3600;
-    // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层
-    const system =
-      (petId ? readPetWhisperPrompt(petId) : undefined) ??
-      (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+    // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层；再无条件追加名字声明
+    const system = petSystemPrompt(petId, merged);
     const now = Date.now();
     const cached = whisperCache.get(petId);
     if (!force && cached && now - cached.ts < intervalSec * 1000) {
@@ -455,6 +468,13 @@ export function apply(ctx: any): void {
       const pet = p as Record<string, unknown> | null;
       const id = String(pet?.id ?? '');
       if (!id) throw new Error(`pets[${index}] 缺少 id`);
+      // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
+      const rawName = pet?.name;
+      let name = typeof rawName === 'string' ? rawName.trim() : '';
+      if (!name) {
+        console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
+        name = id;
+      }
       const size = Number(pet?.size);
       if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
       // ≤0.2.0 旧配置无 display：缺失按默认「both」处理并警告；写了但非法仍报错
@@ -471,7 +491,7 @@ export function apply(ctx: any): void {
         throw new Error(`pet「${id}」whisperEnabled 非法（需布尔值 true/false）`);
       }
       const effectiveWhisper: boolean = whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled;
-      return { ...pet, display: effectiveDisplay, whisperEnabled: effectiveWhisper };
+      return { ...pet, name, display: effectiveDisplay, whisperEnabled: effectiveWhisper };
     });
 
   /** 主宠物列表：用户层（main-config.json）优先，否则包内 config.jsonc */
@@ -536,6 +556,30 @@ export function apply(ctx: any): void {
     } catch {
       return undefined; // 配置解析失败：回落全局人设
     }
+  };
+
+  /** 某宠物的显示名（name，可重复）：有效列表里该实例的 name；缺失/解析失败回落实例 id */
+  const readPetName = (petId: string): string => {
+    try {
+      const found = readEffectivePets().find((p) => String(p.id) === petId);
+      if (found) {
+        const n = String((found as { name?: unknown }).name ?? '').trim();
+        if (n) return n;
+      }
+    } catch {
+      /* 有效宠物列表解析失败：回退 id */
+    }
+    return petId;
+  };
+
+  /** 某宠物的最终人设 system：人设提示词（种类文件 → 全局，同 whisperPrompt 回落链）
+   *  + 无条件追加一句名字声明（name 字段，缺失回落 id）——碎碎念与对话共用同一拼装。 */
+  const petSystemPrompt = (petId: string, merged: Record<string, unknown>): string => {
+    const base =
+      (petId ? readPetWhisperPrompt(petId) : undefined) ??
+      (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+    const nameLine = '你的名字是“' + readPetName(petId) + '”。';
+    return base ? base + '\n' + nameLine : nameLine;
   };
 
   /** 某宠物的种类桶（= assetRoot，多实例共享）；非文件宠物（主宠物）回落实例 id 本身 */
@@ -736,7 +780,7 @@ export function apply(ctx: any): void {
                 if (!clean) {
                   sendJson(res, 400, {
                     error:
-                      'invalid pet config: expected { pets:[{id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled 布尔）',
+                      'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled 布尔）',
                   });
                   return;
                 }
@@ -885,10 +929,9 @@ export function apply(ctx: any): void {
                 const result = await withMemoryLock(async () => {
                   const merged = readMergedConfig();
                   const rounds = resolveMemoryRounds(petId, merged);
-                  // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链）
-                  const system =
-                    (petId ? readPetWhisperPrompt(petId) : undefined) ??
-                    (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
+                  // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链），
+                  // 再无条件追加名字声明
+                  const system = petSystemPrompt(petId, merged);
                   const mem = await readMemory();
                   const bucketKey = petAssetRoot(petId) ?? petId;
                   const bucket = (mem[bucketKey] ??= {});

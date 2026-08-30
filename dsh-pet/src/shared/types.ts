@@ -69,7 +69,11 @@ export interface Animations {
  *    用它而不是 id——多实例共享同一素材目录。main 等常规宠物缺省回落自身 id。
  */
 export interface Pet {
+  /** 唯一标识（程序定位用：素材/记忆/端点参数都按它；绝不重叠，冲突即配置错误） */
   id: string;
+  /** 显示名（可重复）：悬浮提示、AI 人设（无条件追加「你的名字是 X」）、未来命令行定位的显示层。
+   *  与 id 的区别：id 唯一、程序认它；name 给人看、可重复。缺失/留空按该宠物 id 处理并告警 */
+  name: string;
   size: number;
   /** 是否启用余额功能：true=触发余额动画+显示余额气泡；false=该宠物完全禁用余额。缺失即配置错误 */
   balanceEnabled: boolean;

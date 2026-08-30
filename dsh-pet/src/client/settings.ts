@@ -44,6 +44,8 @@ export const zh = {
   emptyPets: '暂无宠物，点击「添加宠物」创建。',
   sizeLabel: '大小（宽度 px）',
   sizeHint: '高度自动 = 宽度 × 9/16。',
+  nameLabel: '名字',
+  nameHint: '显示名：鼠标悬浮宠物时弹出，也会加进 AI 人设（你的名字是 X）。可重复，留空按宠物 id 处理。',
   balanceEnabled: '余额功能',
   balanceEnabledHint: '启用后该宠物触发余额动画并显示余额气泡。',
   whisperEnabled: '碎碎念',
@@ -100,6 +102,9 @@ export const en = {
   emptyPets: 'No pets yet — click "Add pet" to create one.',
   sizeLabel: 'Size (width px)',
   sizeHint: 'Height is automatic = width × 9/16.',
+  nameLabel: 'Name',
+  nameHint:
+    'Shown on hover and added to AI personas ("your name is X"). Duplicates allowed; empty falls back to the pet id.',
   balanceEnabled: 'Balance',
   balanceEnabledHint: 'When enabled, this pet plays balance animations and shows the balance bubble.',
   whisperEnabled: 'Whisper',
@@ -378,6 +383,8 @@ export function makePetConfigSection(rt: {
         ...list,
         {
           id,
+          // 新宠物默认名字 = 自己的新 id（与「缺失 name 按 id 处理」同一语义，避免继承模板名字造成同名）
+          name: id,
           size: tpl.size,
           balanceEnabled: tpl.balanceEnabled,
           whisperEnabled: tpl.whisperEnabled,
@@ -472,7 +479,7 @@ export function makePetConfigSection(rt: {
                   fontSize: '13px',
                   cursor: 'pointer',
                 },
-                children: p.id + ' (' + p.size + 'px)',
+                children: (p.name || p.id) + ' (' + p.size + 'px)',
               }),
             ),
             h('button', {
@@ -506,6 +513,30 @@ export function makePetConfigSection(rt: {
                 borderRadius: '12px',
               },
               children: [
+                h('label', {
+                  style: {
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                    fontSize: '12px',
+                    color: 'var(--dsw-alias-label-secondary)',
+                  },
+                  children: [
+                    t('nameLabel'),
+                    h('input', {
+                      type: 'text',
+                      value: String(cur.name ?? ''),
+                      disabled: busy,
+                      maxLength: 50,
+                      onChange: (e: ChangeEvent<HTMLInputElement>) => updateSel({ name: e.target.value }),
+                      style: { width: '200px', ...inputStyle },
+                    }),
+                    h('span', {
+                      style: { fontSize: '11px', color: 'var(--dsw-alias-label-tertiary)' },
+                      children: t('nameHint'),
+                    }),
+                  ],
+                }),
                 h('label', {
                   style: {
                     display: 'flex',

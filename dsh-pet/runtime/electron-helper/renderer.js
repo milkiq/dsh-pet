@@ -227,7 +227,7 @@ class PetSprite {
       v.muted = true;
       v.playsInline = true;
       v.autoplay = true;
-      v.title = 'dsh-pet';
+      v.title = this.pet.name;
     }
     this.hit = document.createElement('div');
     this.hit.className = 'pet-hit';
@@ -235,7 +235,7 @@ class PetSprite {
     this.hit.style.top = (S.HIT_BOX.y0 / 360) * 100 + '%';
     this.hit.style.width = ((S.HIT_BOX.x1 - S.HIT_BOX.x0) / 640) * 100 + '%';
     this.hit.style.height = ((S.HIT_BOX.y1 - S.HIT_BOX.y0) / 360) * 100 + '%';
-    this.hit.title = 'dsh-pet';
+    this.hit.title = this.pet.name;
     this.bubble = document.createElement('div');
     this.bubble.className = 'pet-bubble';
 

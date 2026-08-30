@@ -68,6 +68,12 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
   for (const p of petsArr) {
     const id = String(p?.id ?? '');
     if (!id || seen.has(id)) throw new Error('dsh-pet: pet id 非法或重复「' + id + '」');
+    // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
+    let name = typeof p?.name === 'string' ? p.name.trim() : '';
+    if (!name) {
+      console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
+      name = id;
+    }
     const size = Number(p?.size);
     if (!Number.isFinite(size) || size <= 0) throw new Error('dsh-pet: pet「' + id + '」大小非法');
     const balanceEnabled = p?.balanceEnabled;
@@ -95,6 +101,7 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
     seen.add(id);
     pets.push({
       id,
+      name,
       size,
       balanceEnabled,
       whisperEnabled: effectiveWhisper,

@@ -18,7 +18,10 @@
   "notificationsEnabled": true,
   // ===================== 默认宠物列表（多开） =====================
   // pets 数组定义默认宠物；「设置页 → 添加宠物」的默认模板取 pets[0]（main）。
-  // 每个宠物独立：id（标识）、size（宽度 px，高度自动 = size × 9/16）、
+  // 每个宠物独立：name（显示名，可重复：悬浮提示 / AI 人设追加「你的名字是X」/ 未来命令行定位的
+  //   显示层。可省略——缺失或留空按该宠物 id 处理并告警，兼容旧配置）、
+  // id（唯一标识，程序定位用：素材/记忆/端点参数都按它，绝不重叠，冲突即配置错误）、
+  // size（宽度 px，高度自动 = size × 9/16）、
   // balanceEnabled（是否启用余额功能：true=触发余额动画+显示余额气泡；false=该宠物完全禁用。
   //   必填布尔值，缺失即配置错误）、display（显示位置，必填四值之一：
   //   web=仅浏览器 overlay / desktop=仅桌面模式（Electron 透明窗）/ both=两者/ none=都不显示。
@@ -27,6 +30,7 @@
   // position（corner: 四角之一；marginX/marginY: 距所属角落偏移 px）
   "pets": [
     {
+      "name": "蓝毛小女仆",
       "id": "main",
       "size": 462,
       "balanceEnabled": true,

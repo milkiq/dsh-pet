@@ -934,7 +934,7 @@ export function makePetUI(rt: {
           };
         })()
       : {};
-    const commonVideoProps = { muted: true, playsInline: true, autoPlay: true, title: 'dsh-pet' };
+    const commonVideoProps = { muted: true, playsInline: true, autoPlay: true, title: cfg.name };
     const hitProps = {
       className: 'dsh-pet-hit',
       style: {
@@ -949,7 +949,7 @@ export function makePetUI(rt: {
       onPointerUp: handlePointerUp,
       onPointerCancel: handlePointerUp,
       onContextMenu: handleContextMenu,
-      title: 'dsh-pet',
+      title: cfg.name,
     };
     return h('div', {
       ref: rootRef,
