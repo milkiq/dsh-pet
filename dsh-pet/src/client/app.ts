@@ -2,7 +2,7 @@
 // 页面代码不在本文件：宠物页面在 pet.ts，设置页在 settings.ts——
 // 类似 Vue 的 App.vue 只挂根组件、SpringBoot 启动类只做装配，不写页面业务。
 import { makePetUI } from './pet';
-import { makePetConfigSection, NS, zh, en } from './settings';
+import { makePetConfigSection, NS, zh, en, petBridge } from './settings';
 import { startNotify } from './notify';
 import type * as ReactNS from 'react';
 
@@ -23,7 +23,7 @@ export function makeFactory(): (require: (mod: string) => any) => any {
     const PetMulti = makePetUI({ h, useState, useEffect, useRef });
 
     const name = 'pet';
-    const inject = ['slots', 'locale', 'connection'];
+    const inject = ['slots', 'locale', 'connection', 'remote', 'remote.commands'];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入的 ctx（locale/slots/webServer 等 service 无静态类型）
     function apply(ctx: any) {
       // 本地化字典（设置页文案）
@@ -41,6 +41,36 @@ export function makeFactory(): (require: (mod: string) => any) => any {
         console.warn('[dsh-pet] 系统通知未启动：connection 服务不可用');
         return () => {};
       }, 'dsh-pet: notifications');
+
+      // /pet 选择框：裸输 /pet 回车或菜单点选时弹出桌宠列表，选中后提交 /pet <id> 由 host 命令落地。
+      // commandUi 是官方 GUI 提供的可选服务：缺失时仅退化为手输参数（/pet <id|名字>），不影响命令本身。
+      ctx.effect(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入服务无静态类型
+        const commandUi = (ctx as any).get?.('commandUi');
+        if (!commandUi || typeof commandUi.decorate !== 'function') {
+          console.warn('[dsh-pet] 命令选择框不可用：commandUi 服务缺失（/pet 仍可手输 id 或名字）');
+          return () => {};
+        }
+        return commandUi.decorate({
+          name: 'pet',
+          available: () => true,
+          ui: {
+            kind: 'popupSelect',
+            // 选项 = 当前生效宠物列表（petBridge.current：主宠物 + 文件宠物，name 已兜底）
+            options: async () =>
+              petBridge.current.map((p) => ({
+                id: p.id,
+                label: p.name || p.id,
+                detail: (p.assetRoot && p.assetRoot !== p.id ? p.assetRoot + ' / ' : '') + p.id,
+              })),
+            // 选中 → 提交 /pet <id>（host handler 校验并设置当前桌宠，命令节点回显名字）
+            onSelect: async (option: { id: string }, session: { sessionId: string }) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- remote 无静态类型
+              await (ctx as any).remote?.commands?.execute(session.sessionId, '/pet ' + option.id, []);
+            },
+          },
+        });
+      }, 'dsh-pet: /pet picker');
 
       // 宠物 overlay（多开：容器渲染多个 PetCard）
       ctx.slots.inject('shell.overlay', function* () {

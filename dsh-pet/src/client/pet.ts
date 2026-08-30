@@ -358,6 +358,42 @@ export function makePetUI(rt: {
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [cfg.id, cfg.whisperEnabled]);
 
+    // 命令触发气泡（/chat 斜杠命令）：1s 轻量轮询 /broadcast?pet=<id>，ts 变化即弹气泡。
+    // 与碎碎念周期轮询独立（host 广播缓存是另一条通道）：手动触发语义不受 whisperEnabled 门控
+    const prevBroadcastTsRef = useRef(0);
+    useEffect(() => {
+      let alive = true;
+      let hasBaseline = false;
+      const refresh = async () => {
+        try {
+          const r = await fetch('/dsh-pet-7340/broadcast?pet=' + encodeURIComponent(cfg.id), { cache: 'no-store' });
+          if (!alive || !r.ok) return;
+          const d = (await r.json().catch(() => null)) as { ok?: unknown; text?: unknown; ts?: unknown } | null;
+          if (!d || d.ok !== true) return;
+          const ts = typeof d.ts === 'number' ? d.ts : 0;
+          if (!hasBaseline) {
+            // 首拉无条件记基线（含 ts=0）：若 ts=0 提前 return 会跳过基线建立，
+            // 导致第一条命令广播被当成基线吃掉（该条永不弹）
+            hasBaseline = true;
+            prevBroadcastTsRef.current = ts;
+            return;
+          }
+          if (ts === 0 || ts === prevBroadcastTsRef.current) return; // 无广播 / 无变化
+          prevBroadcastTsRef.current = ts;
+          if (typeof d.text === 'string' && d.text) triggerWhisper(d.text);
+        } catch {
+          /* 广播轮询失败静默：下一周期再试 */
+        }
+      };
+      void refresh();
+      const timer = window.setInterval(() => void refresh(), 1000);
+      return () => {
+        alive = false;
+        window.clearInterval(timer);
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [cfg.id]);
+
     // 碎碎念触发（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（10s 消失，与动画解耦）
     const triggerWhisper = (text: string) => {
       const pool = petAnims.events?.whisper;

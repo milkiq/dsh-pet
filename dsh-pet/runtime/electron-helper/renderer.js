@@ -203,6 +203,10 @@ class PetSprite {
     this.whisperBaseline = false;
     this.prevWhisperTs = 0;
     this.whisperLoopTimer = null;
+    // 命令触发气泡（/chat 命令）：1s 轻轮询 /broadcast，ts 变化即弹气泡（与碎碎念周期独立，不受开关门控）
+    this.broadcastLoopTimer = null;
+    this.broadcastBaseline = false;
+    this.prevBroadcastTs = 0;
     // 对话弹窗（shared 组件）：当前挂载的 close() 句柄 + 开启标记
     // （chatOpen 是穿透守卫：弹窗是窗口内 DOM，期间整窗保持可交互，与 menuOpen 同语义——否则
     //   光标移到输入框（不在身体命中区）就会被 onMouseMove 翻回穿透，点击全被透传）
@@ -278,6 +282,7 @@ class PetSprite {
     if (this.bubbleTimer !== null) window.clearTimeout(this.bubbleTimer);
     if (this.whisperTimer !== null) window.clearTimeout(this.whisperTimer);
     if (this.whisperLoopTimer !== null) window.clearTimeout(this.whisperLoopTimer);
+    if (this.broadcastLoopTimer !== null) window.clearTimeout(this.broadcastLoopTimer);
     if (this.chatClose) {
       this.chatClose();
       this.chatClose = null;
@@ -990,6 +995,35 @@ class PetSprite {
     void refresh();
   }
 
+  // 命令触发气泡（/chat 斜杠命令）：1s 轻量轮询 /broadcast?pet=<id>，ts 变化即弹气泡。
+  // 与碎碎念周期轮询独立（host 广播缓存是另一条通道）：手动触发语义不受 whisperEnabled 门控
+  startBroadcastLoop() {
+    if (this.broadcastLoopTimer !== null) return;
+    const refresh = async () => {
+      try {
+        const petId = encodeURIComponent(this.pet.id);
+        const res = await fetch(withSuffix('broadcast') + '?pet=' + petId, { cache: 'no-store' });
+        if (!res.ok) return;
+        const d = (await res.json().catch(() => null)) || {};
+        const ts = typeof d.ts === 'number' ? d.ts : 0;
+        if (!this.broadcastBaseline) {
+          // 首拉无条件记基线（含 ts=0）：若 ts=0 提前 return 会跳过基线建立，
+          // 导致第一条命令广播被当成基线吃掉（该条永不弹）
+          this.broadcastBaseline = true;
+          this.prevBroadcastTs = ts;
+          return;
+        }
+        if (ts === 0 || ts === this.prevBroadcastTs) return; // 无广播 / 无变化
+        this.prevBroadcastTs = ts;
+        if (typeof d.text === 'string' && d.text) this.showWhisper(d.text);
+      } catch (e) {
+        console.warn('[dsh-pet] 广播拉取异常 pet=' + this.pet.id, e);
+      }
+    };
+    this.broadcastLoopTimer = window.setInterval(() => void refresh(), 1000);
+    void refresh();
+  }
+
   // 碎碎念展示（本宠物）：随机抽 events.whisper 动画 + 弹文本气泡（10s 消失，与余额同一语义）
   showWhisper(text) {
     const pool = this.animations.events?.whisper;
@@ -1131,6 +1165,8 @@ function startLoops() {
 
   // 碎碎念：每只启用宠物独立轮询（startWhisperLoop）——各自周期、各自人设、各自一句话（与浏览器一致）
   for (const s of sprites) s.startWhisperLoop();
+  // 命令触发气泡：每只宠物独立 1s 轻轮询（startBroadcastLoop）——/chat 命令写入即展示
+  for (const s of sprites) s.startBroadcastLoop();
 
   // 手动 /balance 触发：1s 轻量轮询触发计数（端点已禁止缓存），计数变化且余额启用时立即刷新余额并递增 tick
   let triggerBaseline = null;

@@ -384,6 +384,11 @@ export function apply(ctx: any): void {
   const thumbUserRoot = join(userRoot, 'main-animation');
   // 手动触发计数：/balance 命令 +1，两边（浏览器/桌面）同样的 1s 轮询检测变化后刷新余额（进程内内存态，重启归零）
   let balanceTriggerCount = 0;
+  // 命令「当前桌宠」（/pet 选择、/chat 使用）：全局单值不分会话；进程内内存，重启回默认第一只
+  let activePetId = '';
+  // 命令触发的展示气泡缓存（/chat 命令写入；浏览器/桌面 1s 轮询 /broadcast 拉取，ts 变化即弹气泡）。
+  // 与碎碎念周期缓存（whisperCache）独立：手动触发语义不受 whisperEnabled 门控（进程内，重启清空）
+  const broadcastCache = new Map<string, { text: string; ts: number }>();
   // 碎碎念生成缓存（按宠物独立）：每只启用的宠物在自己的周期内返回同一句（ts 不变），
   // 同宠物的多个端共享一句、避免重复 LLM 调用（进程内内存态，重启清空）
   const whisperCache = new Map<string, { text: string; ts: number }>();
@@ -620,6 +625,34 @@ export function apply(ctx: any): void {
     return 5;
   };
 
+  /** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 返回 {reply,ts}。
+   *  供 /chat 端点（POST）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。 */
+  const chatWithPet = async (
+    petId: string,
+    text: string,
+  ): Promise<
+    | { ok: true; reply: string; ts: number }
+    | { ok: false; reason: 'provider-missing' | 'generate-error'; message?: string }
+  > =>
+    withMemoryLock(async () => {
+      const merged = readMergedConfig();
+      const rounds = resolveMemoryRounds(petId, merged);
+      // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链），再无条件追加名字声明
+      const system = petSystemPrompt(petId, merged);
+      const mem = await readMemory();
+      const bucketKey = petAssetRoot(petId) ?? petId;
+      const bucket = (mem[bucketKey] ??= {});
+      const entry = (bucket[petId] ??= { messages: [] });
+      const list = entry.messages.slice().slice(-rounds * 2);
+      const generated = await generateChat(ctx, system, list, text);
+      if (!generated.ok) return generated;
+      const now = Date.now();
+      entry.messages.push({ role: 'user', content: text, ts: now });
+      entry.messages.push({ role: 'assistant', content: generated.text, ts: now });
+      await writeMemory(mem);
+      return { ok: true as const, reply: generated.text, ts: now };
+    });
+
   /**
    * 当前生效宠物列表 = 主宠物 + 额外宠物（pet/ 文件定义）。
    * 额外宠物 id 与主宠物列表冲突 → 显式报错并跳过（同名宠物绝不静默覆盖）。
@@ -635,6 +668,29 @@ export function apply(ctx: any): void {
       return true;
     });
     return [...main, ...extra] as Record<string, unknown>[];
+  };
+
+  /** 命令触发的展示气泡：/chat 命令写入（两端 1s 轮询 /broadcast 拉取展示）；覆盖手动触发场景 */
+  const broadcastTo = (petId: string, text: string): void => {
+    broadcastCache.set(petId, { text, ts: Date.now() });
+  };
+
+  /** 当前交互桌宠 id：/pet 已选且仍存在 → 该宠物；未选/已失效 → 有效宠物列表第一只（进程内，重启回默认） */
+  const resolveActivePetId = (): string => {
+    try {
+      const eff = readEffectivePets();
+      if (eff.length === 0) return '';
+      if (activePetId && eff.some((p) => String(p.id) === activePetId)) return activePetId;
+      return String(eff[0].id);
+    } catch {
+      return activePetId;
+    }
+  };
+
+  /** 宠物的显示名（name，缺失回落 id）——命令文案用 */
+  const petDisplayName = (pet: Record<string, unknown>): string => {
+    const n = String(pet.name ?? '').trim();
+    return n || String(pet.id ?? '');
   };
 
   let hasDesktopPet = false;
@@ -926,25 +982,7 @@ export function apply(ctx: any): void {
                   sendJson(res, 200, { ok: false, reason: 'bad-request', message: '消息过长（限 2000 字）' });
                   return;
                 }
-                const result = await withMemoryLock(async () => {
-                  const merged = readMergedConfig();
-                  const rounds = resolveMemoryRounds(petId, merged);
-                  // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链），
-                  // 再无条件追加名字声明
-                  const system = petSystemPrompt(petId, merged);
-                  const mem = await readMemory();
-                  const bucketKey = petAssetRoot(petId) ?? petId;
-                  const bucket = (mem[bucketKey] ??= {});
-                  const entry = (bucket[petId] ??= { messages: [] });
-                  const list = entry.messages.slice().slice(-rounds * 2);
-                  const generated = await generateChat(ctx, system, list, text);
-                  if (!generated.ok) return generated;
-                  const now = Date.now();
-                  entry.messages.push({ role: 'user', content: text, ts: now });
-                  entry.messages.push({ role: 'assistant', content: generated.text, ts: now });
-                  await writeMemory(mem);
-                  return { ok: true as const, reply: generated.text, ts: now };
-                });
+                const result = await chatWithPet(petId, text);
                 sendJson(res, 200, result);
                 return;
               }
@@ -959,6 +997,20 @@ export function apply(ctx: any): void {
                 message: e instanceof Error ? e.message : String(e),
               });
             }
+            return;
+          }
+
+          // 命令触发气泡广播：/dsh-pet-7340/broadcast?pet=<id>（GET，no-cache）
+          // /chat 命令把碎碎念/对话文本写入 broadcastCache，浏览器/桌面 1s 轻量轮询拉取，
+          // ts 变化即弹气泡——与 /balance/trigger 同语义（无缓存返回 ts=0，轮询侧恒定不触发）
+          if (rest === 'broadcast') {
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { error: 'method not allowed' });
+              return;
+            }
+            const petId = String(url.searchParams.get('pet') ?? '');
+            const hit = broadcastCache.get(petId);
+            sendJson(res, 200, { ok: true, text: hit?.text ?? '', ts: hit?.ts ?? 0 });
             return;
           }
 
@@ -1090,6 +1142,98 @@ export function apply(ctx: any): void {
         },
       }),
     'dsh-pet: /balance command',
+  );
+
+  // /pet 斜杠命令：选择「当前桌宠」（/chat 对话的目标）。浏览器端另有 commandUi 装饰的选择框
+  // （裸输 /pet 回车或菜单点选时弹出，选中后提交 /pet <id> 走同一 handler）；手输参数认 id 或名字
+  // （name 可重复：唯一命中才认，重名报错列出候选 id）。
+  ctx.effect(
+    () =>
+      ctx.commands.register({
+        name: 'pet',
+        description: '选择桌宠（/chat 对话的目标；支持选择框或手输 id/名字）',
+        input: { hint: '[宠物 id 或名字]（留空查看当前）' },
+        handler: ({ rawInput }: { rawInput: string }) => {
+          const arg = rawInput.trim();
+          let eff: Record<string, unknown>[];
+          try {
+            eff = readEffectivePets();
+          } catch {
+            eff = [];
+          }
+          if (!arg) {
+            const cur = resolveActivePetId();
+            const found = eff.find((p) => String(p.id) === cur);
+            return {
+              kind: 'success',
+              text: '当前桌宠：' + (found ? petDisplayName(found) : cur || '（无可交互桌宠）'),
+            };
+          }
+          const byId = eff.find((p) => String(p.id) === arg);
+          if (byId) {
+            activePetId = String(byId.id);
+            return { kind: 'success', text: '已选择桌宠：' + petDisplayName(byId) };
+          }
+          const byName = eff.filter((p) => petDisplayName(p) === arg);
+          if (byName.length === 1) {
+            activePetId = String(byName[0].id);
+            return { kind: 'success', text: '已选择桌宠：' + petDisplayName(byName[0]) };
+          }
+          if (byName.length > 1) {
+            return {
+              kind: 'error',
+              text:
+                '「' +
+                arg +
+                '」有 ' +
+                byName.length +
+                ' 只桌宠（id：' +
+                byName.map((p) => String(p.id)).join('、') +
+                '），请用 id 指定',
+            };
+          }
+          return { kind: 'error', text: '找不到桌宠「' + arg + '」（id 或名字都行；/pet 回车可打开选择框）' };
+        },
+      }),
+    'dsh-pet: /pet command',
+  );
+
+  // /chat 斜杠命令：与当前桌宠对话。无参数 = 碎碎念一句（手动语义：绕过节流立即新生成，不受
+  // whisperEnabled 门控）；有参数 = 正常对话（走 /chat 端点同一条路径：记忆 + 人设 + 写盘）。
+  // 两分支的文本都写入广播缓存 → 浏览器/桌面 1s 轮询 /broadcast 拉取后弹气泡展示。
+  ctx.effect(
+    () =>
+      ctx.commands.register({
+        name: 'chat',
+        description: '与桌宠对话：留空 = 碎碎念一句；输入消息 = 正常对话',
+        input: { hint: '[消息]（留空 = 碎碎念）' },
+        handler: async ({ rawInput }: { rawInput: string }) => {
+          const petId = resolveActivePetId();
+          if (!petId) return { kind: 'error', text: '没有可交互的桌宠' };
+          const text = rawInput.trim();
+          try {
+            if (!text) {
+              // 碎碎念：force=true 立即生成并刷新周期缓存（同宠物两端轮询 /whisper 也会跟着展示）
+              const w = await serveWhisper(petId, true);
+              if (!w.ok) {
+                return { kind: 'error', text: '碎碎念生成失败' + (w.message ? '：' + w.message : '') };
+              }
+              broadcastTo(petId, w.text ?? '');
+              return { kind: 'success', text: w.text ?? '' };
+            }
+            if (text.length > 2000) return { kind: 'error', text: '消息过长（限 2000 字）' };
+            const r = await chatWithPet(petId, text);
+            if (!r.ok) {
+              return { kind: 'error', text: '对话失败' + (r.message ? '：' + r.message : '') };
+            }
+            broadcastTo(petId, r.reply);
+            return { kind: 'success', text: r.reply };
+          } catch (e) {
+            return { kind: 'error', text: '对话失败：' + (e instanceof Error ? e.message : String(e)) };
+          }
+        },
+      }),
+    'dsh-pet: /chat command',
   );
 
   // 系统通知不在此处：它独立于宠物（浏览器半侧 notify.ts 经 connection 事件流监听），
