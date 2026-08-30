@@ -22,11 +22,20 @@ const helperMain = resolve(here, '..', 'runtime', 'electron-helper', 'main.js');
 const defaultConfigUrl =
   process.env.DSH_PET_CONFIG_URL || process.argv[2] || 'http://127.0.0.1:3080/dsh-pet-7340/config.jsonc';
 
-// 解析 electron.exe（不阻塞安装：提示用户先 ensure:electron）
+// 平台适配：Electron 可执行文件相对路径（win32=electron.exe / darwin=Electron.app / linux=electron）
+const PLAT = process.platform;
+const electronRel =
+  PLAT === 'win32'
+    ? 'electron.exe'
+    : PLAT === 'darwin'
+      ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
+      : 'electron';
+
+// 解析 Electron 可执行文件（不阻塞安装：提示用户先 ensure:electron）
 const candidates = [
   process.env.DSH_PET_ELECTRON_PATH,
   process.env.ELECTRON_PATH,
-  join(process.env.USERPROFILE || '', '.dsh', 'electron', 'electron.exe'),
+  join(process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || '', '.dsh'), 'electron', electronRel),
 ];
 const electron = candidates.find((value) => value && existsSync(value));
 if (!electron) {

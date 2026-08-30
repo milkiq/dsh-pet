@@ -67,13 +67,30 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
   const localAppData = process.env.LOCALAPPDATA || join(userProfile, 'AppData', 'Local');
   // DSH 主目录：与 ensure-electron.mjs 保持一致，认 DSH_HOME（默认 ~/.dsh）
   const dshHome = process.env.DSH_HOME || join(userProfile, '.dsh');
-  const localCandidates = [
-    join(dshHome, 'electron', 'electron.exe'),
-    join(appData, 'npm', 'node_modules', 'electron', 'dist', 'electron.exe'),
-    join(localAppData, 'Programs', 'Electron', 'electron.exe'),
-    'C:/Program Files/Electron/electron.exe',
-    'C:/Program Files (x86)/Electron/electron.exe',
-  ];
+  // 本地候选路径按平台：win32（electron.exe / Program Files）/ darwin（Electron.app）/ linux
+  const dshElectron = join(dshHome, 'electron', ELECTRON_REL);
+  const localCandidates =
+    PLAT === 'win32'
+      ? [
+          dshElectron,
+          join(appData, 'npm', 'node_modules', 'electron', 'dist', 'electron.exe'),
+          join(localAppData, 'Programs', 'Electron', 'electron.exe'),
+          'C:/Program Files/Electron/electron.exe',
+          'C:/Program Files (x86)/Electron/electron.exe',
+        ]
+      : PLAT === 'darwin'
+        ? [
+            dshElectron,
+            '/Applications/Electron.app/Contents/MacOS/Electron',
+            join(userProfile, 'Applications', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
+            join('/usr/local/lib/node_modules/electron/dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
+          ]
+        : [
+            dshElectron,
+            '/usr/local/bin/electron',
+            '/usr/bin/electron',
+            '/opt/electron/electron',
+          ];
   for (const candidate of localCandidates) push(candidate);
   if (process.env.ELECTRON_PATH) push(process.env.ELECTRON_PATH);
   return list.find((value) => existsSync(value));
@@ -85,9 +102,31 @@ export function dshHomeDir(): string {
   return process.env.DSH_HOME || join(userProfile, '.dsh');
 }
 
-/** Electron 落地路径：$DSH_HOME/electron/electron.exe。 */
+// ---------- 平台适配（win32 / darwin / linux）----------
+// Electron 官方发布包按平台/架构不同：win32 解压出 electron.exe + 散文件；
+// darwin 解压出 Electron.app（可执行文件在 Contents/MacOS/Electron）；linux 是 electron 单文件。
+
+/** 当前平台标识（win32 / darwin / linux） */
+const PLAT = process.platform;
+
+/** $DSH_HOME/electron 落地目录下，可执行文件的相对路径（按平台） */
+const ELECTRON_REL =
+  PLAT === 'win32'
+    ? 'electron.exe'
+    : PLAT === 'darwin'
+      ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
+      : 'electron';
+
+/** 下载 zip 文件名：electron-v<ver>-<platform>-<arch>.zip（官方命名） */
+function electronZipName(version: string): string {
+  const plat = PLAT === 'win32' ? 'win32' : PLAT === 'darwin' ? 'darwin' : 'linux';
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  return `electron-v${version}-${plat}-${arch}.zip`;
+}
+
+/** Electron 落地路径：$DSH_HOME/electron/<按平台的可执行文件>。 */
 export function defaultElectronExe(): string {
-  return join(dshHomeDir(), 'electron', 'electron.exe');
+  return join(dshHomeDir(), 'electron', ELECTRON_REL);
 }
 
 export interface EnsureElectronOptions {
@@ -99,15 +138,18 @@ export interface EnsureElectronOptions {
   timeoutMs?: number;
 }
 
-/** 解压后必须存在的关键文件（校验下载完整性，缺则清理重试）。 */
-const REQUIRED_FILES = [
-  'electron.exe',
-  'icudtl.dat',
-  'resources.pak',
-  'snapshot_blob.bin',
-  'chrome_100_percent.pak',
-  'v8_context_snapshot.bin',
-];
+/** 解压后必须存在的关键文件（按平台校验下载完整性，缺则清理重试）。
+ *  win32：electron.exe + 散文件；darwin：Electron.app 关键结构；linux：electron 单文件。 */
+const REQUIRED_FILES =
+  PLAT === 'win32'
+    ? ['electron.exe', 'icudtl.dat', 'resources.pak', 'snapshot_blob.bin', 'chrome_100_percent.pak', 'v8_context_snapshot.bin']
+    : PLAT === 'darwin'
+      ? [
+          ELECTRON_REL, // Electron.app/Contents/MacOS/Electron
+          join('Electron.app', 'Contents', 'Info.plist'),
+          join('Electron.app', 'Contents', 'Frameworks', 'Electron Framework.framework'),
+        ]
+      : ['electron'];
 
 /** 以子进程方式跑一条命令（tar/powershell），返回退出码（不依赖 process.execPath）。 */
 function runProcess(command: string, args: string[]): Promise<number> {
@@ -151,7 +193,7 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
   const mirror = options.mirror || process.env.DSH_PET_ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/';
   const timeoutMs = options.timeoutMs ?? 10 * 60 * 1000;
   const targetDir = join(dshHomeDir(), 'electron');
-  const exe = join(targetDir, 'electron.exe');
+  const exe = join(targetDir, ELECTRON_REL);
   if (existsSync(exe)) return exe;
 
   // 下载日志用 console 直出（ctx.logger 在部分宿主不映射到终端，排障时看不到）。
@@ -159,9 +201,9 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
   const warn = (message: string): void => console.warn(`[dsh-pet] ${message}`);
   const startedAt = Date.now();
 
-  log(`Electron not found, downloading v${version} ...`);
+  log(`Electron not found, downloading v${version} (${PLAT}-${process.arch}) ...`);
   mkdirSync(targetDir, { recursive: true });
-  const zipName = `electron-v${version}-win32-x64.zip`;
+  const zipName = electronZipName(version);
   const url = `${mirror.replace(/\/$/, '')}/${version}/${zipName}`;
   const zipPath = join(tmpdir(), zipName);
 
@@ -216,7 +258,7 @@ export async function ensureElectronDownload(options: EnsureElectronOptions = {}
     log(`extracting to ${targetDir} ...`);
     await extractZip(zipPath, targetDir);
     if (!existsSync(exe)) {
-      throw new Error('Electron zip extracted, but electron.exe not found');
+      throw new Error(`Electron zip extracted, but ${ELECTRON_REL} not found`);
     }
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     log(`ready in ${seconds}s: ${exe}`);

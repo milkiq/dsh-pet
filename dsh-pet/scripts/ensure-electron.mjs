@@ -24,15 +24,39 @@ const HOME = process.env.DSH_HOME || join(process.env.USERPROFILE || process.env
 const VERSION = process.env.DSH_PET_ELECTRON_VERSION || '43.3.0';
 const MIRROR = process.env.DSH_PET_ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/';
 const TARGET_DIR = resolve(HOME, 'electron');
-const EXE = join(TARGET_DIR, 'electron.exe');
-const REQUIRED_FILES = [
-  'electron.exe',
-  'icudtl.dat',
-  'resources.pak',
-  'snapshot_blob.bin',
-  'chrome_100_percent.pak',
-  'v8_context_snapshot.bin',
-];
+
+// ---------- 平台适配（win32 / darwin / linux）----------
+const PLAT = process.platform;
+const ELECTRON_REL =
+  PLAT === 'win32'
+    ? 'electron.exe'
+    : PLAT === 'darwin'
+      ? join('Electron.app', 'Contents', 'MacOS', 'Electron')
+      : 'electron';
+const EXE = join(TARGET_DIR, ELECTRON_REL);
+const REQUIRED_FILES =
+  PLAT === 'win32'
+    ? [
+        'electron.exe',
+        'icudtl.dat',
+        'resources.pak',
+        'snapshot_blob.bin',
+        'chrome_100_percent.pak',
+        'v8_context_snapshot.bin',
+      ]
+    : PLAT === 'darwin'
+      ? [
+          ELECTRON_REL,
+          join('Electron.app', 'Contents', 'Info.plist'),
+          join('Electron.app', 'Contents', 'Frameworks', 'Electron Framework.framework'),
+        ]
+      : ['electron'];
+
+function electronZipName() {
+  const plat = PLAT === 'win32' ? 'win32' : PLAT === 'darwin' ? 'darwin' : 'linux';
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  return `electron-v${VERSION}-${plat}-${arch}.zip`;
+}
 
 async function download(url, dest) {
   const response = await fetch(url, { redirect: 'follow' });
@@ -70,10 +94,10 @@ async function main() {
     return;
   }
 
-  console.log(`[ensure-electron] Electron not found, downloading v${VERSION} ...`);
+  console.log(`[ensure-electron] Electron not found, downloading v${VERSION} (${PLAT}-${process.arch}) ...`);
   mkdirSync(TARGET_DIR, { recursive: true });
 
-  const zipName = `electron-v${VERSION}-win32-x64.zip`;
+  const zipName = electronZipName();
   const url = `${MIRROR.replace(/\/$/, '')}/${VERSION}/${zipName}`;
   const zipPath = join(tmpdir(), zipName);
 
@@ -82,7 +106,7 @@ async function main() {
     await download(url, zipPath);
     extractZip(zipPath, TARGET_DIR);
     if (!existsSync(EXE)) {
-      throw new Error('Electron zip extracted, but electron.exe not found');
+      throw new Error(`Electron zip extracted, but ${ELECTRON_REL} not found`);
     }
     console.log(EXE);
   } finally {
