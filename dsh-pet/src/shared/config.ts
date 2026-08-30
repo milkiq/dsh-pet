@@ -74,8 +74,12 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
     if (typeof balanceEnabled !== 'boolean')
       throw new Error('dsh-pet: pet「' + id + '」缺少 balanceEnabled（需为布尔值 true/false）');
     const display = p?.display;
-    if (typeof display !== 'string' || !PET_DISPLAY_SET.has(display))
-      throw new Error('dsh-pet: pet「' + id + '」缺少 display（需为 web/desktop/both/none 之一）');
+    if (display === undefined || display === null) {
+      console.warn(`dsh-pet: pet「${id}」缺少 display，已按默认 both 处理`);
+    } else if (typeof display !== 'string' || !PET_DISPLAY_SET.has(display)) {
+      throw new Error('dsh-pet: pet「' + id + '」display 非法（需为 web/desktop/both/none 之一）');
+    }
+    const effectiveDisplay: PetDisplay = display === undefined || display === null ? 'both' : (display as PetDisplay);
     const corner = p?.position?.corner;
     if (typeof corner !== 'string' || !CORNER_SET.has(corner)) throw new Error('dsh-pet: pet「' + id + '」corner 非法');
     const marginX = Number(p?.position?.marginX);
@@ -86,7 +90,7 @@ export function assertPetsBlock(petsArr: unknown): Pet[] {
       id,
       size,
       balanceEnabled,
-      display: display as PetDisplay,
+      display: effectiveDisplay,
       position: { corner: corner as Corner, marginX, marginY },
     });
   }

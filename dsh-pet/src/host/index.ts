@@ -362,9 +362,15 @@ export function apply(ctx: any): void {
       if (!id) throw new Error(`pets[${index}] 缺少 id`);
       const size = Number(pet?.size);
       if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
-      if (typeof pet?.display !== 'string' || !PET_DISPLAY_SET.has(pet.display))
-        throw new Error(`pet「${id}」缺少 display（需 web/desktop/both/none 之一）`);
-      return pet as Record<string, unknown>;
+      // ≤0.2.0 旧配置无 display：缺失按默认「both」处理并警告；写了但非法仍报错
+      const display = pet?.display;
+      if (display === undefined || display === null) {
+        console.warn(`dsh-pet: pet「${id}」缺少 display，已按默认 both 处理`);
+      } else if (typeof display !== 'string' || !PET_DISPLAY_SET.has(display)) {
+        throw new Error(`pet「${id}」display 非法（需 web/desktop/both/none 之一）`);
+      }
+      const effectiveDisplay: string = display === undefined || display === null ? 'both' : String(display);
+      return { ...pet, display: effectiveDisplay };
     });
 
   /** 主宠物列表：用户层（main-config.json）优先，否则包内 config.jsonc */
