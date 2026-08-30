@@ -321,7 +321,15 @@ class PetSprite {
   switchTo(next, nextOnce) {
     if (!next) return;
     const pending = this.pending;
-    if (pending && pending.anim === next && pending.once === nextOnce) return;
+    if (pending && pending.anim === next && pending.once === nextOnce) {
+      // 防重命中（单动画点击时目标=当前动画，不重播）：仍消费 Q 弹标记，压当前前台视频，
+      // 保证「点击唯一动画」时挤压反馈不丢（与浏览器同构）。
+      if (this.pendingSquash) {
+        this.pendingSquash = false;
+        this.startSquash(this.front === 0 ? this.videoA : this.videoB);
+      }
+      return;
+    }
     const gen = ++this.gen;
     this.pending = { anim: next, once: nextOnce, gen };
     const target = this.front === 0 ? this.videoB : this.videoA;

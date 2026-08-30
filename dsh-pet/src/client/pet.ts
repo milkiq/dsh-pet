@@ -165,7 +165,16 @@ export function makePetUI(rt: {
     const switchTo = (next: string, nextOnce: boolean) => {
       if (!next) return;
       const pending = pendingRef.current;
-      if (pending && pending.anim === next && pending.once === nextOnce) return;
+      if (pending && pending.anim === next && pending.once === nextOnce) {
+        // 防重命中（单动画点击时目标=当前动画，不重播）：仍消费 Q 弹标记，压当前前台视频，
+        // 保证「点击唯一动画」时挤压反馈不丢（与桌面端同构）。
+        if (pendingSquashRef.current) {
+          pendingSquashRef.current = false;
+          const front = frontRef.current === 0 ? videoARef : videoBRef;
+          if (front.current) startSquash(front.current);
+        }
+        return;
+      }
       const gen = ++genRef.current;
       pendingRef.current = { anim: next, once: nextOnce, gen };
       const target = frontRef.current === 0 ? videoBRef : videoARef;
@@ -706,6 +715,9 @@ export function makePetUI(rt: {
       const name = pick(petAnims.clicks);
       console.log('[dsh-pet] ' + new Date().toTimeString().slice(0, 8) + ' pet=' + cfg.id + ' -> [CLICK] ' + name);
       pendingSquashRef.current = true; // 等新点击动画切到前台后 Q 弹（压新首帧）
+      // 单动画点击（目标=当前播放）时 React 状态不变不会触发 useEffect 重放：
+      // 递增 seq 强制 switchTo 走一遍（防重分支负责在动画相同时消费 Q 弹标记）
+      setSeq((s) => s + 1);
       setAnim(name);
     };
 
