@@ -1,9 +1,16 @@
 /**
  * dsh-pet 宿主半侧（host half）—— 宠物插件的"后端"部分
  *
- * 职责：在 DSH Web 服务器上注册 `/dsh-pet-7340/` 前缀路由。
+ * 职责：提供 `/dsh-pet-7340/` 前缀的**业务能力**（handlePetRoute 纯函数，路由与桌面管道共用）。
  * 全部配置（内置默认 + 用户主配置 + 文件宠物）由 ./config 的 readAllConfig 统一读取合并，
  * 本文件只消费它的返回值（绝对正确、零校验），不再接触任何配置文件。
+ *
+ * 两个入口消费同一份 handlePetRoute：
+ *   - HTTP 路由：注册在 DSH WebServer 上（浏览器 overlay / 设置页 / 斜杠命令用）
+ *   - 桌面 Helper 管道：helper-process.ts 的 bridgeHandler（DSH_PET_BRIDGE=1 时经
+ *     dsh-pet-bridge:// scheme + stdout JSON 行 + 本地回调，**不走 HTTP**——
+ *     DSH Desktop 2.0.3+ 的浏览器访问闸门会拦插件子进程的裸 HTTP 请求）
+ * 两端行为严格一致（硬契约：浏览器/桌面功能/文案/配置完全对齐）。
  *
  * 路由：
  *   /dsh-pet-7340/config             → 合并后的**成品配置**（{ main:{...}, test1:{...}, ... }，
@@ -105,15 +112,28 @@ async function sendFile(res: ServerResponse, file: string, contentType: string):
 /** 该宠物是否参与桌面模式（Electron 透明窗） */
 const isDesktopVisible = (display: unknown): boolean => display === 'desktop' || display === 'both';
 
-/** 发送 JSON 响应 */
-function sendJson(res: ServerResponse, status: number, obj: unknown): void {
+/** 发送 JSON 响应（headers 可选：如 no-cache 触发计数） */
+function sendJson(res: ServerResponse, status: number, obj: unknown, headers: Record<string, string> = {}): void {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
+    ...headers,
   });
   res.end(body);
 }
+
+/** 发送纯文本响应（素材 404/400 等显式错误文案） */
+function sendText(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end(body);
+}
+
+/** 单次业务路由的应答（WebServer 注册与桌面 Helper 管道共用的同一契约；消费方各自落盘） */
+type RouteResult =
+  | { kind: 'json'; status: number; obj: unknown; headers?: Record<string, string> }
+  | { kind: 'text'; status: number; body: string }
+  | { kind: 'file'; file: string; contentType: string };
 
 /** 收集请求体（文本） */
 function readBody(req: IncomingMessage): Promise<string> {
@@ -353,7 +373,8 @@ export function apply(ctx: any): void {
       return;
     }
     const origin = `http://127.0.0.1:${port}`;
-    // 桌面渲染端也从 /config 拿同一份成品配置（每只宠物一个局部小窗口）
+    // 桌面渲染端也从同一份 handlePetRoute 拿成品配置（每只宠物一个局部小窗口；经管道，不走 HTTP——
+    // DSH Desktop 2.0.3+ 会拦插件自拉进程的裸 HTTP 请求，浏览器访问闸门只放行带令牌的请求）
     const configUrl = `${origin}${ROUTE_PREFIX}/config`;
     helper = new HelperProcess(
       {
@@ -361,8 +382,28 @@ export function apply(ctx: any): void {
         env: {
           DSH_PET_CONFIG_URL: configUrl,
           DSH_PET_SCALE: '1',
+          // 打开 bridge 协议：main.js 注册 dsh-pet-bridge scheme，把渲染端请求经管道转给宿主
+          DSH_PET_BRIDGE: '1',
           // 每只桌面宠物一个局部小窗口：透传宠物列表（[{id,size}]）
           DSH_PET_PETS: JSON.stringify(desktopPetList()),
+        },
+        // bridge 协议处理器 = HTTP 路由同一份 handlePetRoute（业务逻辑唯一，两端天然一致）；
+        // 素材过文件路径（main.js 自行读盘），json/text 过 body
+        bridgeHandler: async (req) => {
+          const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', req.body);
+          if (result.kind === 'file') {
+            // file 分支恒 200（404/400 已由 text 分支表达）
+            return { id: req.id, status: 200, contentType: result.contentType, file: result.file };
+          }
+          if (result.kind === 'text') {
+            return { id: req.id, status: result.status, contentType: 'text/plain; charset=utf-8', body: result.body };
+          }
+          return {
+            id: req.id,
+            status: result.status,
+            contentType: 'application/json; charset=utf-8',
+            body: JSON.stringify(result.obj),
+          };
         },
       },
       ctx.logger ?? console,
@@ -425,284 +466,269 @@ export function apply(ctx: any): void {
   /** 用户动画根：唯一格式 webm（main-animation/webm）。 */
   const userRootFor = (): string => join(thumbUserRoot, 'webm');
 
+  /** 单次业务路由(WebServer 注册 → HTTP 落盘 / 桌面 Helper 管道 → scheme 应答,共用同一份实现):
+   *  输入只需 rawUrl(/dsh-pet-7340/... + 查询) + method + body 文本;返回 RouteResult(JSON/文本/文件),
+   *  消费方各自落盘——业务逻辑只有一份,两端天然一致(硬契约:浏览器/桌面行为严格对齐)。 */
+  const handlePetRoute = async (rawUrl: string, method: string, body?: string): Promise<RouteResult> => {
+    const url = new URL(rawUrl, 'http://localhost');
+    const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
+
+    // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / DELETE 恢复默认）
+    if (rest === 'config') {
+      if (method === 'GET') {
+        // 唯一配置入口：readAllConfig 返回绝对正确的完成品聚合（{ main:{...}, test1:{...} }），
+        // 浏览器/桌面/设置页直接消费，无需任何校验/兜底
+        try {
+          return { kind: 'json', status: 200, obj: readAllConfig(configPaths) };
+        } catch (e) {
+          return { kind: 'json', status: 500, obj: { error: e instanceof Error ? e.message : String(e) } };
+        }
+      }
+      if (method === 'PUT') {
+        try {
+          const parsed = JSON.parse(body ?? '');
+          const clean = saveUserConfig(parsed);
+          if (!clean) {
+            return {
+              kind: 'json',
+              status: 400,
+              obj: {
+                error:
+                  'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled 布尔）',
+              },
+            };
+          }
+          await mkdir(userRoot, { recursive: true });
+          await writeFile(userConfigPath, JSON.stringify(clean, null, 2), 'utf8');
+          syncDesktop(); // display 等可能变化：重解析桌面宠物并重启 Helper
+          return { kind: 'json', status: 200, obj: { ok: true } };
+        } catch {
+          return { kind: 'json', status: 400, obj: { error: 'invalid JSON body' } };
+        }
+      }
+      if (method === 'DELETE') {
+        try {
+          await rm(userConfigPath, { force: true });
+        } catch {
+          /* 不存在也视为成功 */
+        }
+        syncDesktop(); // 恢复默认配置：重解析桌面宠物并重启 Helper
+        return { kind: 'json', status: 200, obj: { ok: true } };
+      }
+      return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+    }
+
+    // 配置文件路径（设置页「高级配置」展示用）
+    if (rest === 'config/meta') {
+      return {
+        kind: 'json',
+        status: 200,
+        obj: {
+          user: userConfigPath,
+          default: join(PACKAGE_ROOT, 'assets', 'config.jsonc'),
+          animations: thumbUserRoot,
+        },
+      };
+    }
+
+    // 余额查询（浏览器/桌面共用；结果由 host 侧完成全部抓取与校验，两端都不接触 key）
+    if (rest === 'balance') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      try {
+        const sel = ctx.agentDefaultModel.currentSelection();
+        const result = await queryBalance(sel.provider, async (ref) => {
+          const rc = await ctx.credentials.resolve(credentialRef(ref));
+          return rc?.value;
+        });
+        return { kind: 'json', status: 200, obj: result };
+      } catch (e) {
+        // 意外异常（如注入服务缺失）：显式 500，不静默
+        return {
+          kind: 'json',
+          status: 500,
+          obj: {
+            ok: false,
+            provider: 'unknown',
+            reason: 'fetch-error',
+            message: e instanceof Error ? e.message : String(e),
+          },
+        };
+      }
+    }
+
+    // 手动触发计数：/dsh-pet-7340/balance/trigger（no-cache，浏览器/桌面 1s 轻量轮询；/balance 命令写入）
+    if (rest === 'balance/trigger') {
+      return {
+        kind: 'json',
+        status: 200,
+        obj: { count: balanceTriggerCount },
+        headers: { 'cache-control': 'no-cache, no-store' }, // 触发计数必须实时，禁止任何缓存层介入
+      };
+    }
+
+    // 碎碎念周期文本：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
+    // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**所属条目的人设**生成一句话
+    // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = main 条目即内置默认）。
+    // 节流/缓存按 pet 分开：同一宠物周期内重复请求返回同一句（ts 不变，client 检测变化才触发），
+    // 同一宠物的多个端（浏览器+桌面窗口）共享一句，不重复调 LLM。
+    if (rest === 'whisper') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      try {
+        const petId = String(url.searchParams.get('pet') ?? '');
+        return { kind: 'json', status: 200, obj: await serveWhisper(petId, false) };
+      } catch (e) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: false, reason: 'generate-error', message: e instanceof Error ? e.message : String(e) },
+        };
+      }
+    }
+
+    // 碎碎念手动触发：/dsh-pet-7340/whisper/trigger?pet=<id>（GET，右键菜单「碎碎念」用）
+    // 与周期端点同一逻辑，但 force=true：绕过节流缓存立即强制新生成一句并刷新缓存
+    // （同宠物周期轮询端下次拉取看到新 ts 也会跟着展示——与 /balance/trigger 同语义）。
+    if (rest === 'whisper/trigger') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      try {
+        const petId = String(url.searchParams.get('pet') ?? '');
+        return { kind: 'json', status: 200, obj: await serveWhisper(petId, true) };
+      } catch (e) {
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: false, reason: 'generate-error', message: e instanceof Error ? e.message : String(e) },
+        };
+      }
+    }
+
+    // 对话：/dsh-pet-7340/chat?pet=<id>
+    //   GET  —— 最近记忆窗口（截尾 chatMemoryRounds 轮），弹窗打开时展示
+    //   POST —— 携带历史生成回复并写入记忆（{text} → {ok, reply, ts}）
+    // 记忆唯一读写方 = host（memory.json；浏览器/桌面两端都只是客户端）→
+    // 同一实例的浏览器与桌面天然共享同一份记忆；文件全存不删，
+    // 请求只截尾部 chatMemoryRounds 轮（1 轮 = 1 问 1 答；合并器已按条目填默认）。
+    if (rest === 'chat') {
+      const petId = String(url.searchParams.get('pet') ?? '');
+      try {
+        if (method === 'GET') {
+          const cfg = readAllConfig(configPaths);
+          const mem = await readMemory();
+          const bucket = mem[findPetInstance(cfg, petId)?.entry ?? petId] ?? {};
+          const list = (bucket[petId]?.messages ?? []).slice();
+          const rounds = memoryRounds(petId, cfg);
+          return { kind: 'json', status: 200, obj: { ok: true, messages: list.slice(-rounds * 2), rounds } };
+        }
+        if (method === 'POST') {
+          const parsed = (JSON.parse(body ?? 'null') as Record<string, unknown> | null) ?? {};
+          const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+          if (!text) {
+            return { kind: 'json', status: 200, obj: { ok: false, reason: 'bad-request', message: '消息为空' } };
+          }
+          if (text.length > 2000) {
+            return {
+              kind: 'json',
+              status: 200,
+              obj: { ok: false, reason: 'bad-request', message: '消息过长（限 2000 字）' },
+            };
+          }
+          const result = await chatWithPet(petId, text);
+          return { kind: 'json', status: 200, obj: result };
+        }
+        return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      } catch (e) {
+        // 配置已由 readAllConfig 保证正确（不再有 config-error 分支）；其余（IO/LLM）→ generate-error
+        return {
+          kind: 'json',
+          status: 200,
+          obj: { ok: false, reason: 'generate-error', message: e instanceof Error ? e.message : String(e) },
+        };
+      }
+    }
+
+    // 命令触发气泡广播：/dsh-pet-7340/broadcast?pet=<id>（GET，no-cache）
+    // /chat 命令把碎碎念/对话文本写入 broadcastCache，浏览器/桌面 1s 轻量轮询拉取，
+    // ts 变化即弹气泡——与 /balance/trigger 同语义（无缓存返回 ts=0，轮询侧恒定不触发）
+    if (rest === 'broadcast') {
+      if (method !== 'GET') return { kind: 'json', status: 405, obj: { error: 'method not allowed' } };
+      const petId = String(url.searchParams.get('pet') ?? '');
+      const hit = broadcastCache.get(petId);
+      return {
+        kind: 'json',
+        status: 200,
+        obj: { ok: true, text: hit?.text ?? '', ts: hit?.ts ?? 0 },
+        headers: { 'cache-control': 'no-cache, no-store' },
+      };
+    }
+
+    // 动画文件：/dsh-pet-7340/thumb/<素材根>/<file>，唯一格式 webm。
+    // 素材归属按「是否存在该宠物的独立素材目录 `pet/<petId>-animation/`」判定：
+    //   - 存在（pet pack 宠物）：只查自己的目录，查不到即 404 显式报错——绝不混用
+    //   - 不存在（**所有主配置宠物**，main 与用户添加的任意多只）：主素材链
+    //     main-animation/webm 优先 → 包内 assets/webm（与宠物数量无关，多只共用）
+    // Safari/HEVC(.mov) 兼容属 fork 定制（保留流水线 scripts/encode_hevc_alpha.sh）；
+    // 需要者自行在本路由加回 .mov 扩展名分支——插件本体不发布、不支持 .mov。
+    // 注意：font / pic 是扁平的 /<scope>/<file>，只有 thumb 是 /<scope>/<petId>/<file>——
+    // 这里先拆 scope，再按 scope 各自拆剩余段，避免 font/pic 被误当作 petId 吞掉文件段。
+    const [scope, ...restParts] = rest.split('/');
+    if (scope === 'font') {
+      const fontRoot = join(PACKAGE_ROOT, 'assets', 'fonts');
+      const fontFile = resolveExisting(fontRoot, restParts.join('/'));
+      if (fontFile === undefined) return { kind: 'text', status: 404, body: 'dsh-pet: font not found' };
+      const ext = fontFile.slice(fontFile.lastIndexOf('.')).toLowerCase();
+      return { kind: 'file', file: fontFile, contentType: MIME[ext] ?? 'application/octet-stream' };
+    }
+
+    // 通知图标：/dsh-pet-7340/pic/<file> → 包内 assets/pic（方形 png，系统通知 icon 用）
+    if (scope === 'pic') {
+      const picRoot = join(PACKAGE_ROOT, 'assets', 'pic');
+      const picFile = resolveExisting(picRoot, restParts.join('/'));
+      if (picFile === undefined) return { kind: 'text', status: 404, body: 'dsh-pet: pic not found' };
+      const ext = picFile.slice(picFile.lastIndexOf('.')).toLowerCase();
+      return { kind: 'file', file: picFile, contentType: MIME[ext] ?? 'application/octet-stream' };
+    }
+
+    if (scope !== 'thumb') {
+      return { kind: 'text', status: 400, body: 'dsh-pet: expected /dsh-pet-7340/thumb/<petId>/<file>' };
+    }
+    // thumb 是三段式：/<scope>/<petId>/<file>——从这里再拆宠物 id 与文件名
+    const [petId, ...nameParts] = restParts;
+    if (!petId || nameParts.length === 0) {
+      return { kind: 'text', status: 400, body: 'dsh-pet: expected /dsh-pet-7340/thumb/<petId>/<file>' };
+    }
+    const fileName = nameParts.join('/');
+    const ext = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
+    if (ext !== '.webm') {
+      return { kind: 'text', status: 400, body: 'dsh-pet: unsupported animation format (expected .webm)' };
+    }
+    // 素材归属（按是否存在该宠物的独立素材目录判定，绝不静默混用）：
+    //   - 存在 `pet/<petId>-animation/`（pet pack 宠物，URL 段 = 素材根 assetRoot）：
+    //     只查自己的目录，查不到即 404 显式报错——绝不回落别的素材
+    //   - 不存在（**所有主配置宠物**：main 及用户添加的任意多只，共用全局动画池）：
+    //     主素材链——用户 main-animation/webm 优先，其次包内 assets/webm
+    const extraAnimDir = join(userRoot, 'pet', petId + '-animation');
+    const file = existsSync(extraAnimDir)
+      ? resolveExisting(extraAnimDir, fileName)
+      : (resolveExisting(userRootFor(), fileName) ?? resolveExisting(assetRootFor(), fileName));
+    if (file === undefined) return { kind: 'text', status: 404, body: 'dsh-pet: asset not found' };
+    return { kind: 'file', file, contentType: MIME[ext] ?? 'application/octet-stream' };
+  };
+
   ctx.effect(
     () =>
       ctx.webServer.register({
         kind: 'prefix',
         path: ROUTE_PREFIX,
         handler: async (req: IncomingMessage, res: ServerResponse) => {
-          const url = new URL(req.url ?? '/', 'http://localhost');
-          const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
-
-          // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / DELETE 恢复默认）
-          if (rest === 'config') {
-            if (req.method === 'GET') {
-              // 唯一配置入口：readAllConfig 返回绝对正确的完成品聚合（{ main:{...}, test1:{...} }），
-              // 浏览器/桌面/设置页直接消费，无需任何校验/兜底
-              try {
-                sendJson(res, 200, readAllConfig(configPaths));
-              } catch (e) {
-                sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
-              }
-              return;
-            }
-            if (req.method === 'PUT') {
-              try {
-                const body = await readBody(req);
-                const parsed = JSON.parse(body);
-                const clean = saveUserConfig(parsed);
-                if (!clean) {
-                  sendJson(res, 400, {
-                    error:
-                      'invalid pet config: expected { pets:[{name?,id,size,balanceEnabled,display,position:{corner,marginX,marginY}}] }（display 为 web/desktop/both/none 之一；可选顶层 notificationsEnabled 布尔）',
-                  });
-                  return;
-                }
-                await mkdir(userRoot, { recursive: true });
-                await writeFile(userConfigPath, JSON.stringify(clean, null, 2), 'utf8');
-                syncDesktop(); // display 等可能变化：重解析桌面宠物并重启 Helper
-                sendJson(res, 200, { ok: true });
-              } catch {
-                sendJson(res, 400, { error: 'invalid JSON body' });
-              }
-              return;
-            }
-            if (req.method === 'DELETE') {
-              try {
-                await rm(userConfigPath, { force: true });
-              } catch {
-                /* 不存在也视为成功 */
-              }
-              syncDesktop(); // 恢复默认配置：重解析桌面宠物并重启 Helper
-              sendJson(res, 200, { ok: true });
-              return;
-            }
-            sendJson(res, 405, { error: 'method not allowed' });
-            return;
+          try {
+            const body = req.method === 'PUT' || req.method === 'POST' ? await readBody(req) : undefined;
+            const result = await handlePetRoute(req.url ?? '/', req.method ?? 'GET', body);
+            if (result.kind === 'json') sendJson(res, result.status, result.obj, result.headers);
+            else if (result.kind === 'text') sendText(res, result.status, result.body);
+            else await sendFile(res, result.file, result.contentType);
+          } catch (e) {
+            sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
           }
-
-          // 配置文件路径（设置页「高级配置」展示用）
-          if (rest === 'config/meta') {
-            sendJson(res, 200, {
-              user: userConfigPath,
-              default: join(PACKAGE_ROOT, 'assets', 'config.jsonc'),
-              animations: thumbUserRoot,
-            });
-            return;
-          }
-
-          // 余额查询（浏览器/桌面共用；结果由 host 侧完成全部抓取与校验，两端都不接触 key）
-          if (rest === 'balance') {
-            if (req.method !== 'GET') {
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            }
-            try {
-              const sel = ctx.agentDefaultModel.currentSelection();
-              const result = await queryBalance(sel.provider, async (ref) => {
-                const rc = await ctx.credentials.resolve(credentialRef(ref));
-                return rc?.value;
-              });
-              sendJson(res, 200, result);
-            } catch (e) {
-              // 意外异常（如注入服务缺失）：显式 500，不静默
-              sendJson(res, 500, {
-                ok: false,
-                provider: 'unknown',
-                reason: 'fetch-error',
-                message: e instanceof Error ? e.message : String(e),
-              });
-            }
-            return;
-          }
-
-          // 手动触发计数：/dsh-pet-7340/balance/trigger（no-cache，浏览器/桌面 1s 轻量轮询；/balance 命令写入）
-          if (rest === 'balance/trigger') {
-            const body = JSON.stringify({ count: balanceTriggerCount });
-            res.writeHead(200, {
-              'content-type': 'application/json; charset=utf-8',
-              'cache-control': 'no-cache, no-store', // 触发计数必须实时，禁止任何缓存层介入
-              'content-length': Buffer.byteLength(body),
-            });
-            res.end(body);
-            return;
-          }
-
-          // 碎碎念周期文本：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
-          // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**所属条目的人设**生成一句话
-          // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = main 条目即内置默认）。
-          // 节流/缓存按 pet 分开：同一宠物周期内重复请求返回同一句（ts 不变，client 检测变化才触发），
-          // 同一宠物的多个端（浏览器+桌面窗口）共享一句，不重复调 LLM。
-          if (rest === 'whisper') {
-            if (req.method !== 'GET') {
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            }
-            try {
-              const petId = String(url.searchParams.get('pet') ?? '');
-              sendJson(res, 200, await serveWhisper(petId, false));
-            } catch (e) {
-              sendJson(res, 200, {
-                ok: false,
-                reason: 'generate-error',
-                message: e instanceof Error ? e.message : String(e),
-              });
-            }
-            return;
-          }
-
-          // 碎碎念手动触发：/dsh-pet-7340/whisper/trigger?pet=<id>（GET，右键菜单「碎碎念」用）
-          // 与周期端点同一逻辑，但 force=true：绕过节流缓存立即强制新生成一句并刷新缓存
-          // （同宠物周期轮询端下次拉取看到新 ts 也会跟着展示——与 /balance/trigger 同语义）。
-          if (rest === 'whisper/trigger') {
-            if (req.method !== 'GET') {
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            }
-            try {
-              const petId = String(url.searchParams.get('pet') ?? '');
-              sendJson(res, 200, await serveWhisper(petId, true));
-            } catch (e) {
-              sendJson(res, 200, {
-                ok: false,
-                reason: 'generate-error',
-                message: e instanceof Error ? e.message : String(e),
-              });
-            }
-            return;
-          }
-
-          // 对话：/dsh-pet-7340/chat?pet=<id>
-          //   GET  —— 最近记忆窗口（截尾 chatMemoryRounds 轮），弹窗打开时展示
-          //   POST —— 携带历史生成回复并写入记忆（{text} → {ok, reply, ts}）
-          // 记忆唯一读写方 = host（memory.json；浏览器/桌面两端都只是客户端）→
-          // 同一实例的浏览器与桌面天然共享同一份记忆；文件全存不删，
-          // 请求只截尾部 chatMemoryRounds 轮（1 轮 = 1 问 1 答；合并器已按条目填默认）。
-          if (rest === 'chat') {
-            const petId = String(url.searchParams.get('pet') ?? '');
-            try {
-              if (req.method === 'GET') {
-                const cfg = readAllConfig(configPaths);
-                const mem = await readMemory();
-                const bucket = mem[findPetInstance(cfg, petId)?.entry ?? petId] ?? {};
-                const list = (bucket[petId]?.messages ?? []).slice();
-                const rounds = memoryRounds(petId, cfg);
-                sendJson(res, 200, { ok: true, messages: list.slice(-rounds * 2), rounds });
-                return;
-              }
-              if (req.method === 'POST') {
-                const body = (JSON.parse(await readBody(req)) as Record<string, unknown>) ?? {};
-                const text = typeof body.text === 'string' ? body.text.trim() : '';
-                if (!text) {
-                  sendJson(res, 200, { ok: false, reason: 'bad-request', message: '消息为空' });
-                  return;
-                }
-                if (text.length > 2000) {
-                  sendJson(res, 200, { ok: false, reason: 'bad-request', message: '消息过长（限 2000 字）' });
-                  return;
-                }
-                const result = await chatWithPet(petId, text);
-                sendJson(res, 200, result);
-                return;
-              }
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            } catch (e) {
-              // 配置已由 readAllConfig 保证正确（不再有 config-error 分支）；其余（IO/LLM）→ generate-error
-              sendJson(res, 200, {
-                ok: false,
-                reason: 'generate-error',
-                message: e instanceof Error ? e.message : String(e),
-              });
-            }
-            return;
-          }
-
-          // 命令触发气泡广播：/dsh-pet-7340/broadcast?pet=<id>（GET，no-cache）
-          // /chat 命令把碎碎念/对话文本写入 broadcastCache，浏览器/桌面 1s 轻量轮询拉取，
-          // ts 变化即弹气泡——与 /balance/trigger 同语义（无缓存返回 ts=0，轮询侧恒定不触发）
-          if (rest === 'broadcast') {
-            if (req.method !== 'GET') {
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            }
-            const petId = String(url.searchParams.get('pet') ?? '');
-            const hit = broadcastCache.get(petId);
-            sendJson(res, 200, { ok: true, text: hit?.text ?? '', ts: hit?.ts ?? 0 });
-            return;
-          }
-
-          // 动画文件：/dsh-pet-7340/thumb/<素材根>/<file>，唯一格式 webm。
-          // 素材归属按「是否存在该宠物的独立素材目录 `pet/<petId>-animation/`」判定：
-          //   - 存在（pet pack 宠物）：只查自己的目录，查不到即 404 显式报错——绝不混用
-          //   - 不存在（**所有主配置宠物**，main 与用户添加的任意多只）：主素材链
-          //     main-animation/webm 优先 → 包内 assets/webm（与宠物数量无关，多只共用）
-          // Safari/HEVC(.mov) 兼容属 fork 定制（保留流水线 scripts/encode_hevc_alpha.sh）；
-          // 需要者自行在本路由加回 .mov 扩展名分支——插件本体不发布、不支持 .mov。
-          // 注意：font / pic 是扁平的 /<scope>/<file>，只有 thumb 是 /<scope>/<petId>/<file>——
-          // 这里先拆 scope，再按 scope 各自拆剩余段，避免 font/pic 被误当作 petId 吞掉文件段。
-          const [scope, ...restParts] = rest.split('/');
-          if (scope === 'font') {
-            const fontRoot = join(PACKAGE_ROOT, 'assets', 'fonts');
-            const fontFile = resolveExisting(fontRoot, restParts.join('/'));
-            if (fontFile === undefined) {
-              res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-              res.end('dsh-pet: font not found');
-              return;
-            }
-            const ext = fontFile.slice(fontFile.lastIndexOf('.')).toLowerCase();
-            await sendFile(res, fontFile, MIME[ext] ?? 'application/octet-stream');
-            return;
-          }
-
-          // 通知图标：/dsh-pet-7340/pic/<file> → 包内 assets/pic（方形 png，系统通知 icon 用）
-          if (scope === 'pic') {
-            const picRoot = join(PACKAGE_ROOT, 'assets', 'pic');
-            const picFile = resolveExisting(picRoot, restParts.join('/'));
-            if (picFile === undefined) {
-              res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-              res.end('dsh-pet: pic not found');
-              return;
-            }
-            const ext = picFile.slice(picFile.lastIndexOf('.')).toLowerCase();
-            await sendFile(res, picFile, MIME[ext] ?? 'application/octet-stream');
-            return;
-          }
-
-          if (scope !== 'thumb') {
-            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('dsh-pet: expected /dsh-pet-7340/thumb/<petId>/<file>');
-            return;
-          }
-          // thumb 是三段式：/<scope>/<petId>/<file>——从这里再拆宠物 id 与文件名
-          const [petId, ...nameParts] = restParts;
-          if (!petId || nameParts.length === 0) {
-            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('dsh-pet: expected /dsh-pet-7340/thumb/<petId>/<file>');
-            return;
-          }
-          const fileName = nameParts.join('/');
-          const ext = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
-          if (ext !== '.webm') {
-            res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('dsh-pet: unsupported animation format (expected .webm)');
-            return;
-          }
-          // 素材归属（按是否存在该宠物的独立素材目录判定，绝不静默混用）：
-          //   - 存在 `pet/<petId>-animation/`（pet pack 宠物，URL 段 = 素材根 assetRoot）：
-          //     只查自己的目录，查不到即 404 显式报错——绝不回落别的素材
-          //   - 不存在（**所有主配置宠物**：main 及用户添加的任意多只，共用全局动画池）：
-          //     主素材链——用户 main-animation/webm 优先，其次包内 assets/webm
-          const extraAnimDir = join(userRoot, 'pet', petId + '-animation');
-          const file = existsSync(extraAnimDir)
-            ? resolveExisting(extraAnimDir, fileName)
-            : (resolveExisting(userRootFor(), fileName) ?? resolveExisting(assetRootFor(), fileName));
-          if (file === undefined) {
-            res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('dsh-pet: asset not found');
-            return;
-          }
-          await sendFile(res, file, MIME[ext] ?? 'application/octet-stream');
         },
       }),
     'dsh-pet: /dsh-pet-7340 asset route',

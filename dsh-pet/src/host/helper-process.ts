@@ -1,9 +1,14 @@
 /**
  * 桌面 Helper 进程管理器 —— 拉起/守护 Electron 透明窗口进程。
  *
- * 架构：Helper 不通过 stdin 通信；渲染端经宿主暴露的 /dsh-pet-7340 HTTP 端点
- * 拉取配置/动画素材/余额/系统通知。这里只负责解析 Electron 可执行文件、
- * 以子进程方式拉起 electron-helper/main.js，并在异常退出时自动重启。
+ * 架构：Helper 与宿主之间除了日志，还有一条 **stdin/stdout JSON 行协议**（bridge）：
+ *   - 渲染端不再直接访问 DSH WebServer（DSH Desktop 2.0.3+ 的浏览器访问闸门会给插件自拉的
+ *     独立进程裸 HTTP 请求回 403），改走自定义 scheme `dsh-pet-bridge://` → Electron 主进程
+ *     （main.js 的 protocol.handle）→ 本模块的管道 → 宿主 handlePetRoute（与 HTTP 路由同一份逻辑）。
+ *   - 协议行统一前缀 `dsh-pet-bridge:`，与普通日志行区分（main.js 的 console 输出也走 stdout）。
+ *   - 素材（webm/字体/光标）不把二进制过管道：宿主返回文件绝对路径，main.js 自行读盘应答。
+ * 本文件负责解析 Electron 可执行文件、以子进程方式拉起 electron-helper/main.js、
+ * 守护协议通道、并在异常退出时自动重启。
  */
 
 import { spawn } from 'node:child_process';
@@ -20,6 +25,32 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const packageRoot = resolve(here, '..');
 export const defaultHelperMain = resolve(packageRoot, 'runtime', 'electron-helper', 'main.js');
 
+/** 协议行前缀：stdout/stdin 里以此开头的整行 JSON 属于 bridge 协议，其余为日志 */
+export const BRIDGE_PREFIX = 'dsh-pet-bridge:';
+
+/** 渲染端（经 main.js 转发）的一次请求：URL 是 /dsh-pet-7340/... 路径 + 查询串；
+ *  cb = main.js 本地回调服务器地址（宿主把应答 POST 回去；Electron 主进程读不到 piped stdin，
+ *  故应答不走 0 号管道 —— electron#4218） */
+export interface BridgeRequest {
+  id: number;
+  method: string;
+  url: string;
+  body?: string;
+  cb?: string;
+}
+
+/** 宿主对一次请求的应答：json/text 走 body；素材走 file（文件绝对路径，main.js 自行读盘） */
+export interface BridgeResponse {
+  id: number;
+  status: number;
+  contentType?: string;
+  body?: string;
+  file?: string;
+}
+
+/** bridge 请求处理器（宿主侧与 handlePetRoute 对接；main.js 不在收到请求时带出宿主动作） */
+export type BridgeHandler = (req: BridgeRequest) => Promise<BridgeResponse>;
+
 interface HelperOptions {
   electronPath?: string;
   helperPath?: string;
@@ -28,6 +59,8 @@ interface HelperOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
   restartDelayMs?: number;
+  /** bridge 协议处理器：renderer 的每条请求（配置/余额/碎碎念/素材等）都经它应答 */
+  bridgeHandler?: BridgeHandler;
 }
 
 type Logger = {
@@ -294,6 +327,8 @@ export class HelperProcess {
   declare private stopping: boolean;
   declare private restartSuppressed: boolean;
   declare private restartTimer?: NodeJS.Timeout;
+  /** stdout 按行缓冲（协议行按 \n 切分）。用 declare + 构造器赋值，避免类字段降级出外部 helper */
+  declare private stdoutBuffer: string;
 
   constructor(options: HelperOptions = {}, logger: Logger = console) {
     this.options = options;
@@ -302,6 +337,7 @@ export class HelperProcess {
     this.stopping = false;
     this.restartSuppressed = false;
     this.restartTimer = undefined;
+    this.stdoutBuffer = '';
   }
 
   start(): import('node:child_process').ChildProcess | undefined {
@@ -316,7 +352,7 @@ export class HelperProcess {
     const child = spawn(command, args, {
       cwd: this.options.cwd || packageRoot,
       env: { ...process.env, ...this.options.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'], // stdin 也要：bridge 协议响应回写（main.js 请求经 stdout 上来）
       windowsHide: true,
     });
     this.child = child;
@@ -334,14 +370,82 @@ export class HelperProcess {
       }
     });
     child.stdout.on('data', (chunk) => {
-      const line = String(chunk).trim();
-      if (line) this.logger.debug?.(`[dsh-pet desktop helper] ${line}`);
+      this.onStdoutChunk(String(chunk));
     });
     child.stderr.on('data', (chunk) => {
       const line = String(chunk).trim();
       if (line) this.logger.warn?.(`[dsh-pet desktop helper] ${line}`);
     });
+    child.stdin?.on('error', () => {
+      /* EPIPE 等：进程退出/重启期间回写失败静默（下一轮 start 重建管道） */
+    });
     return child;
+  }
+
+  /** stdout 按行缓冲：`dsh-pet-bridge:` 前缀整行 = 协议请求，其余 = 日志行 */
+  private onStdoutChunk(chunk: string): void {
+    this.stdoutBuffer += chunk;
+    let nl: number;
+    while ((nl = this.stdoutBuffer.indexOf('\n')) >= 0) {
+      const line = this.stdoutBuffer.slice(0, nl);
+      this.stdoutBuffer = this.stdoutBuffer.slice(nl + 1);
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith(BRIDGE_PREFIX)) {
+        void this.handleBridgeLine(trimmed);
+        continue;
+      }
+      this.logger.debug?.(`[dsh-pet desktop helper] ${trimmed}`);
+    }
+  }
+
+  /** 处理一条协议请求：交给宿主 bridgeHandler，结果按 id POST 回 main.js 的回调服务器
+   *  （cb 由请求行携带；不走 stdin —— Electron 主进程收不到 piped stdin） */
+  private async handleBridgeLine(line: string): Promise<void> {
+    const child = this.child;
+    if (!child?.stdin || !this.options.bridgeHandler) return;
+    let req: BridgeRequest;
+    try {
+      req = JSON.parse(line.slice(BRIDGE_PREFIX.length)) as BridgeRequest;
+    } catch {
+      this.logger.warn?.('[dsh-pet desktop helper] bridge 协议行非法，已忽略');
+      return;
+    }
+    if (typeof req.id !== 'number') return;
+    try {
+      // bridgeHandler 返回完整 BridgeResponse（含 id）；异常时兜底 500
+      const resp = await this.options.bridgeHandler(req);
+      this.sendBridgeResponse(req, resp);
+    } catch (e) {
+      this.sendBridgeResponse(req, {
+        id: req.id,
+        status: 500,
+        contentType: 'application/json; charset=utf-8',
+        body: JSON.stringify({ error: `bridge handler error: ${e instanceof Error ? e.message : String(e)}` }),
+      });
+    }
+  }
+
+  /** 把应答发回 main.js：优先 POST 到请求行携带的 cb（本地回调服务器）；无 cb 时回写 stdin（低版本兼容） */
+  private sendBridgeResponse(req: BridgeRequest, resp: BridgeResponse): void {
+    const cb = typeof req.cb === 'string' && /^https?:[/][/]/.test(req.cb) ? req.cb : '';
+    if (cb) {
+      void fetch(cb, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(resp),
+      }).catch(() => {
+        /* 回调失败（main.js 已退出等）：请求端会超时降级，这里静默 */
+      });
+      return;
+    }
+    const child = this.child;
+    if (!child?.stdin || child.stdin.destroyed) return;
+    try {
+      child.stdin.write(BRIDGE_PREFIX + JSON.stringify(resp) + '\n');
+    } catch {
+      /* ignore */
+    }
   }
 
   stop(reason = 'plugin-disposed'): void {

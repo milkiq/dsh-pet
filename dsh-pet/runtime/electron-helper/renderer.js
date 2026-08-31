@@ -31,14 +31,17 @@ const CONFIG = {
   scale: Number(params.get('scale') || '1'),
   petIndex: Number(params.get('petIndex') || '0'),
 };
+// bridge 模式（DSH_PET_BRIDGE=1）：请求走自定义 scheme，经 Electron 主进程转宿主管道——
+// 绕开 DSH Desktop 2.0.3+ 的浏览器访问闸门（只放行带令牌的请求，插件自拉进程的裸 HTTP 全 403）
+const BRIDGE = params.get('bridge') === '1';
 // 视口 = 主屏工作区（窗口只是宠物的一块局部画布）：漫游边界/角落定位/位置比例换算用它
 const VIEW = {
   w: Number(params.get('workAreaW') || (window.screen && window.screen.availWidth) || 1920),
   h: Number(params.get('workAreaH') || (window.screen && window.screen.availHeight) || 1080),
 };
 const ORIGIN = new URL(CONFIG.configUrl).origin;
-/** 宿主 /dsh-pet-7340 前缀（所有业务端点都从这里拼，不再依赖 configUrl 的路径形态） */
-const BASE = ORIGIN + '/dsh-pet-7340';
+/** 宿主 /dsh-pet-7340 前缀：bridge 走自定义 scheme（主进程转发），否则 HTTP 直连宿主 */
+const BASE = BRIDGE ? 'dsh-pet-bridge://dsh-pet/dsh-pet-7340' : ORIGIN + '/dsh-pet-7340';
 const BALANCE_URL = BASE + '/balance';
 const TRIGGER_URL = BASE + '/balance/trigger';
 const WHISPER_URL = BASE + '/whisper';
@@ -94,7 +97,7 @@ function scheduleReboot() {
 async function loadConfig() {
   // 唯一配置入口：宿主 /config 的成品聚合（host readAllConfig 已合并并保证绝对正确），
   // 一步拉取 → 拍平成渲染列表，零校验零兜底
-  const res = await fetch(CONFIG.configUrl, { cache: 'no-store' });
+  const res = await fetch(BASE + '/config', { cache: 'no-store' });
   if (!res.ok) throw new Error(`config http ${res.status}`);
   const merged = await res.json();
   return {

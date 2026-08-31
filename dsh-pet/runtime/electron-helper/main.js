@@ -12,14 +12,43 @@
  * 进/出宠物身体命中区时经 pet:set-interactive 翻转可交互——透明像素不挡下层应用，
  * 与浏览器 overlay（仅 .dsh-pet-hit 可交互）严格对齐。
  *
- * 端点：renderer 需要的全部由 DSH_PET_CONFIG_URL 推导（config/thumb/balance/trigger）。
+ * 数据通道（bridge 模式，DSH_PET_BRIDGE=1 由宿主注入）：
+ * 渲染端不再直连宿主 WebServer（DSH Desktop 2.0.3+ 的浏览器访问闸门会拦无令牌裸 HTTP）——
+ * 本进程注册自定义 scheme `dsh-pet-bridge://`，protocol.handle 收到渲染端请求后
+ * 经 stdin/stdout JSON 行协议转发宿主（helper-process.ts 的 BridgeHandler），
+ * 宿主用与 HTTP 路由同一份 handlePetRoute 应答；素材应答带文件绝对路径，本进程读盘返回。
+ * 无 DSH_PET_BRIDGE（手动 start-desktop / 开发流）时保持旧路径：渲染端直接 HTTP 访问宿主。
  */
-const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, protocol } = require('electron');
 const path = require('node:path');
 const { writeFileSync } = require('node:fs');
+const fsPromises = require('node:fs/promises');
 
 // 允许无用户手势直接播放（余额动画等）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+/** bridge 模式：DSH_PET_BRIDGE=1（宿主注入）。开启时注册 dsh-pet-bridge scheme + 管道转发 */
+const BRIDGE = process.env.DSH_PET_BRIDGE === '1';
+/** 协议行前缀（与 helper-process.ts 的 BRIDGE_PREFIX 一致） */
+const BRIDGE_PREFIX = 'dsh-pet-bridge:';
+
+if (BRIDGE) {
+  // 自定义 scheme：standard（可解析 URL）+ secure（按 https 对待）+ supportFetchAPI（fetch 可用）
+  // + stream（视频流）+ corsEnabled（让 CORS 规则生效，配合响应里的 ACAO 头放行 file:// 源页面）
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: 'dsh-pet-bridge',
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        stream: true,
+        bypassCSP: true,
+        corsEnabled: true,
+      },
+    },
+  ]);
+}
 
 /** 窗口表：petId -> BrowserWindow */
 const windows = new Map();
@@ -107,6 +136,7 @@ function createPetWindows() {
       .loadFile('index.html', {
         query: {
           configUrl,
+          bridge: BRIDGE ? '1' : '0',
           scale: process.env.DSH_PET_SCALE || '1',
           petIndex: String(pet.index),
           workAreaW: String(area.width),
@@ -121,7 +151,119 @@ function createPetWindows() {
   }
 }
 
+// ---------- bridge 协议（渲染端 custom scheme → 本进程 → 宿主 stdout JSON 行 + 本地回调） ----------
+// 渲染端的每个 fetch 都落到 dsh-pet-bridge://，protocol.handle 把请求以一行 JSON 写 stdout 转发宿主。
+// 宿主应答**不走近 0 号管道**：Electron 主进程在 Windows 上收不到 piped stdin（electron#4218），
+// 所以本进程开一个 127.0.0.1 随机端口 HTTP 回调（DSH 闸门只拦 DSH WebServer 路由，管不到这里）；
+// 请求行携带回调 URL，宿主处理完 POST 应答回来，按 id 唤醒等待中的请求。
+// 素材（webm/字体/光标）：宿主只回文件绝对路径，本进程自行读盘应答（二进制不过管道）。
+// 协议行统一前缀 BRIDGE_PREFIX，宿主侧按前缀区分协议与日志（console 输出也走 stdout）。
+
+let bridgeSeq = 0;
+/** id -> {resolve, reject}：一个请求对应宿主的一次回调应答 */
+const bridgePending = new Map();
+let bridgeCallbackUrl = '';
+
+/** 渲染端请求 → 宿主（请求行带回调 URL）；返回宿主应答（{status, contentType?, body?, file?}），超时抛错 */
+function bridgeRequest(method, url, body) {
+  return new Promise((resolve, reject) => {
+    const id = ++bridgeSeq;
+    bridgePending.set(id, { resolve, reject });
+    process.stdout.write(BRIDGE_PREFIX + JSON.stringify({ id, method, url, body, cb: bridgeCallbackUrl }) + '\n');
+    // 宿主若长期不应答（进程退出/宿主动作挂起）不无限挂起：45s 兜底（LLM 生成最长 30-60s）
+    setTimeout(() => {
+      const p = bridgePending.get(id);
+      if (!p) return;
+      bridgePending.delete(id);
+      p.reject(new Error('bridge request timeout'));
+    }, 45000).unref?.();
+  });
+}
+
+/** 把宿主回调应答（{id, status, ...}）派发给对应请求 */
+function bridgeResolve(resp) {
+  const p = resp && bridgePending.get(resp.id);
+  if (!p) return;
+  bridgePending.delete(resp.id);
+  p.resolve(resp);
+}
+
+/** 本地回调服务器：宿主把应答 POST 到这里（127.0.0.1 随机端口，绕开 stdin/DSH 闸门） */
+function startBridgeCallback() {
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/respond') {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('dsh-pet: not found');
+      return;
+    }
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      try {
+        bridgeResolve(JSON.parse(raw));
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('ok');
+      } catch {
+        res.writeHead(400, { 'content-type': 'text/plain' });
+        res.end('dsh-pet: bad payload');
+      }
+    });
+    req.on('error', () => {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      res.end('dsh-pet: bad payload');
+    });
+  });
+  server.on('error', (e) => {
+    console.error('[dsh-pet-desktop-helper] bridge callback server error:', String(e && e.message ? e.message : e));
+  });
+  server.listen(0, '127.0.0.1', () => {
+    const addr = server.address();
+    bridgeCallbackUrl = 'http://127.0.0.1:' + (addr && typeof addr === 'object' ? addr.port : 0) + '/respond';
+    console.error('[dsh-pet-desktop-helper] bridge callback: ' + bridgeCallbackUrl);
+  });
+  return server;
+}
+
+/** 处理一个渲染端请求：拼宿主请求行 → 等应答 → 组装 Response（素材读盘） */
+async function handleBridgeRequest(request) {
+  const url = new URL(request.url); // dsh-pet-bridge://dsh-pet/dsh-pet-7340/...
+  const method = request.method || 'GET';
+  let body;
+  if (method === 'POST' || method === 'PUT') {
+    body = await request.text();
+  }
+  const resp = await bridgeRequest(method, url.pathname + url.search, body);
+  const headers = { 'access-control-allow-origin': '*' }; // 渲染端页面是 file:// 源，scheme 跨源需 CORS
+  if (resp.contentType) headers['content-type'] = resp.contentType;
+  if (resp.file) {
+    // 素材：直接读盘返回（宿主已解析好绝对路径；带 range 让视频能拖动进度条）
+    try {
+      const data = await fsPromises.readFile(resp.file);
+      return new Response(new Uint8Array(data), { status: resp.status || 200, headers });
+    } catch (e) {
+      console.error('[dsh-pet-desktop-helper] bridge file read failed:', resp.file, e);
+      return new Response('dsh-pet: asset read failed', { status: 500, headers });
+    }
+  }
+  return new Response(resp.body ?? '', { status: resp.status || 200, headers });
+}
+
 app.whenReady().then(() => {
+  if (BRIDGE) {
+    // 自定义 scheme 接住渲染端全部请求（配置/余额/碎碎念/广播/素材）
+    protocol.handle('dsh-pet-bridge', (request) =>
+      handleBridgeRequest(request).catch((e) => {
+        console.error('[dsh-pet-desktop-helper] bridge handler error:', String(e && e.message ? e.message : e));
+        return new Response('dsh-pet: bridge error', {
+          status: 502,
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      }),
+    );
+    startBridgeCallback(); // 宿主应答回调服务器（stdin 在 Electron 主进程不可用，改走本地 HTTP）
+  }
+
   createPetWindows();
 
   // 宠物窗口跟随：renderer 逐帧上报窗口内容区位置/尺寸
