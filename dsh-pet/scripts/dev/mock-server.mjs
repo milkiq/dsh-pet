@@ -2,17 +2,16 @@
  * dev/mock-server.mjs —— 桌面模式运行时验证用 mock DSH 宿主（开发自测工具，不入 npm 包）。
  *
  * 模拟 /dsh-pet-7340 前缀的宿主端点（与浏览器 overlay 共用同一套契约）：
- *   GET  /dsh-pet-7340/config.jsonc          插件包真实配置
- *   GET  /dsh-pet-7340/config                用户覆盖层（空对象 = 回落默认）
+ *   GET  /dsh-pet-7340/config              成品配置聚合（{ main: <真实 config.jsonc 解析> }，
+ *                                        mock 环境无用户层/文件宠物，只有 main 条目）
  *   GET  /dsh-pet-7340/thumb/<petId>/<name>.webm  从 assets/webm 读素材（petId 段剥掉，统一素材根）
- *   GET  /dsh-pet-7340/extra-pets            额外宠物（mock 返回空列表：开发环境不模拟 pet pack）
  *   GET  /dsh-pet-7340/balance               模拟 DeepSeek 余额（固定 11.06 元）
  *   GET  /dsh-pet-7340/balance/trigger       触发计数（恒 0，验证轮询基线）
  *
  * 系统通知是浏览器半侧（notify.ts）的独立能力，走 DSH 网页自身事件流，与桌面模式/mock 无关。
  *
  * 用法：node scripts/dev/mock-server.mjs [port]
- * 配合：npm run start:desktop -- http://127.0.0.1:<port>/dsh-pet-7340/config.jsonc
+ * 配合：npm run start:desktop -- http://127.0.0.1:<port>/dsh-pet-7340/config
  */
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, statSync, readFileSync } from 'node:fs';
@@ -24,6 +23,13 @@ const here = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const PACKAGE_ROOT = resolve(here, '..', '..');
 const WEBM_ROOT = join(PACKAGE_ROOT, 'assets', 'webm');
 const CONFIG_FILE = join(PACKAGE_ROOT, 'assets', 'config.jsonc');
+
+/** 剥除 JSONC 注释（与真实宿主 readAllConfig 的 stripJsonc 同规则），返回纯 JSON */
+const stripJsonc = (src) =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^\\:])\/\/.*$/gm, '$1')
+    .trim();
 
 const sendJson = (res, status, body) => {
   const payload = JSON.stringify(body);
@@ -55,30 +61,15 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // 成品配置：mock 环境无用户层/文件宠物 → 只有 main 条目（= 内置默认，字段原样保留）；
+  // 消费端按成品结构读取（不校验）。
   if (pathname === '/dsh-pet-7340/config') {
-    sendJson(res, 200, {}); // 无用户覆盖层 -> 回落默认
-    return;
-  }
-
-  if (pathname === '/dsh-pet-7340/config.jsonc') {
     if (!existsSync(CONFIG_FILE)) {
       res.writeHead(404);
       res.end('no config.jsonc');
       return;
     }
-    const body = readFileSync(CONFIG_FILE);
-    res.writeHead(200, {
-      'content-type': 'application/json; charset=utf-8',
-      'content-length': body.length,
-      'cache-control': 'public, max-age=3600',
-    });
-    res.end(body);
-    return;
-  }
-
-  // 额外宠物：mock 环境不模拟 pet pack（真实宿主会扫描用户 pet/ 目录）
-  if (pathname === '/dsh-pet-7340/extra-pets') {
-    sendJson(res, 200, { pets: [] });
+    sendJson(res, 200, { main: JSON.parse(stripJsonc(readFileSync(CONFIG_FILE, 'utf8'))) });
     return;
   }
 
@@ -122,6 +113,6 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[mock-server] listening on http://127.0.0.1:${PORT}/dsh-pet-7340/`);
-  console.log(`[mock-server] config:  http://127.0.0.1:${PORT}/dsh-pet-7340/config.jsonc`);
+  console.log(`[mock-server] config:  http://127.0.0.1:${PORT}/dsh-pet-7340/config`);
   console.log(`[mock-server] assets:  ${WEBM_ROOT}`);
 });

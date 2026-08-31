@@ -1,19 +1,12 @@
 // 宠物页面：单个宠物实例（PetCard）+ 多开容器（PetMulti）。
 // 工厂形态与 settings.ts 一致：client 半侧不能顶层 import react，
 // react 能力由 DSH 运行时注入（rt），组件在工厂内制造。
-// 动作配置在本模块持有：PetMulti 加载后赋值，PetCard 只读（单一事实来源 = config.jsonc）。
-// 纯逻辑（选择/移动几何/余额/配置校验）来自 src/shared —— 与桌面模式共用同一份源码。
+// 配置唯一入口 = GET /dsh-pet-7340/config 的**成品聚合**（host readAllConfig 保证绝对正确）：
+// PetMulti 一次拉取 → flattenConfigPets 拍平成渲染列表，PetCard 直接读字段，零校验零兜底。
+// 纯逻辑（选择/移动几何/余额/拍平）来自 src/shared —— 与桌面模式共用同一份源码。
 import { pick, rollKind, pickCategoryAction } from '../shared/pickers';
 import { planMove } from '../shared/motion';
-import {
-  assertClientConfig,
-  EMPTY_CONF,
-  applyUserOverrides,
-  isWebVisible,
-  mergeExtraPets,
-  stripJsonc,
-  type UserOverrides,
-} from '../shared/config';
+import { flattenConfigPets, isWebVisible } from '../shared/config';
 import { balanceEventIndex, balancePercent, fetchBalanceState, type BalanceState } from '../shared/balance';
 import { fetchWhisperState, fetchWhisperTrigger } from '../shared/whisper';
 import { makeBalanceBubble, makeWhisperBubble } from './bubble';
@@ -44,13 +37,17 @@ import {
   type DragSample,
   type ThrowState,
 } from '../shared/physics';
-import type { ClientConfig, Corner, Pet } from '../shared/types';
+import type { Animations, Corner, Pet, Weights } from '../shared/types';
 import type * as ReactNS from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
-/** 运行时配置（PetMulti 加载后赋值；PetCard 只读） */
-let config: ClientConfig = EMPTY_CONF;
+/** 运行期宠物：拍平后的成品实例——条目级字段（动画池/权重/刷新周期）已吹入，必填 */
+export type RuntimePet = Pet & {
+  animations: Animations;
+  animationWeights: Weights;
+  eventsRefreshSec: Record<string, number>;
+};
 
 /** 播放动画扩展名：唯一播放/发布格式 webm（VP9-alpha），源码写死、不做运行时判断。
  *  Safari/HEVC(.mov) 兼容属 fork 定制（仓库保留流水线 scripts/encode_hevc_alpha.sh），
@@ -108,15 +105,23 @@ export function makePetUI(rt: {
   const WhisperBubble = makeWhisperBubble({ h });
 
   /** 单个宠物实例（配置由容器 PetMulti 传入；碎碎念轮询/触发/气泡完全自理） */
-  function PetCard({ cfg, balance, balanceTick }: { cfg: Pet; balance: BalanceState | null; balanceTick: number }) {
+  function PetCard({
+    cfg,
+    balance,
+    balanceTick,
+  }: {
+    cfg: RuntimePet;
+    balance: BalanceState | null;
+    balanceTick: number;
+  }) {
     // ---- 尺寸（由配置传入；容器/设置页更新后即时跟随）----
     const [size, setSize] = useState(cfg.size);
     const halfW = size / 2;
     const halfH = (size * 9) / 16 / 2;
-    // 动画池与权重按宠物取：文件宠物（pet/ 目录定义，extra）自带**完整独立**动画池；
-    // main 等常规宠物（无 anims 段）用全局 config.animations（现有语义，不回落方向相反）。
-    const petAnims = cfg.animations ?? config.animations;
-    const petWeights = cfg.animationWeights ?? config.animationWeights;
+    // 动画池与权重：拍平时已把所属条目的池吹进 cfg（文件宠物自带完整独立池；主宠物用 main 条目
+    // 即内置默认池）——成品绝对正确，直接读，不做任何回落
+    const petAnims = cfg.animations;
+    const petWeights = cfg.animationWeights;
 
     // ---- React 状态 ----
     const [anim, setAnim] = useState(petAnims.idle[0] ?? '');
@@ -349,7 +354,7 @@ export function makePetUI(rt: {
         }
       };
       void refresh();
-      const intervalMs = Math.max(1000, (config.eventsRefreshSec?.whisper ?? 3600) * 1000);
+      const intervalMs = Math.max(1000, (cfg.eventsRefreshSec.whisper ?? 3600) * 1000);
       const timer = window.setInterval(() => void refresh(), intervalMs);
       return () => {
         alive = false;
@@ -1017,12 +1022,16 @@ export function makePetUI(rt: {
     });
   }
 
-  /** 多开容器：拉取配置 → 合并默认+用户层 pets → 渲染多个 PetCard */
+  /** 多开容器：一次拉取成品配置 → 拍平 → 渲染多个 PetCard */
   function PetMulti() {
     const [pets, setPets] = useState<Pet[]>([]);
     const [ready, setReady] = useState(false);
-    // 文件宠物（pet/ 目录定义）：加载后填充；设置页 sync 过来的列表不含它们，这里统一合并回去
+    // 文件宠物（非 main 条目的实例）：加载后填充；设置页 sync 过来的列表不含它们，这里统一合并回去
     const extrasRef = useRef<Pet[]>([]);
+    // main 条目的条目级字段（设置页保存来的可编辑列表是裸实例，回填动画池/权重/周期用）
+    const mainConfRef = useRef<Record<string, unknown>>({});
+    // 主条目刷新周期（余额轮询等全局节奏用；合并器已填内置默认）
+    const mainRefreshRef = useRef<Record<string, number>>({});
     // 余额状态（容器统一拉取，PetCard 共享；balanceTick 每次成功拉取递增，驱动事件动画）
     const [balance, setBalance] = useState<BalanceState | null>(null);
     const [balanceTick, setBalanceTick] = useState(0);
@@ -1033,50 +1042,41 @@ export function makePetUI(rt: {
       let alive = true;
       (async () => {
         try {
-          const r1 = await fetch('/dsh-pet-7340/config.jsonc');
-          if (!r1.ok) throw new Error('config.jsonc HTTP ' + r1.status);
-          config = assertClientConfig(JSON.parse(stripJsonc(await r1.text())));
-          const defaults = config.pets;
-          // 用户覆盖层（覆盖片段：pets / animations / animationWeights，缺省回落默认）
-          let user: UserOverrides = {};
-          try {
-            const r2 = await fetch('/dsh-pet-7340/config');
-            if (r2.ok && r2.status !== 204) user = await r2.json().catch(() => ({}));
-          } catch {
-            /* 无用户层时忽略 */
-          }
-          // 合并后统一校验：用户层覆盖可能缺字段（如 moves/events），直接整体替换会静默丢失，
-          // 这里对最终配置再跑一遍 assertClientConfig —— 缺失即显式报错，不静默运行残缺配置
-          config = assertClientConfig(applyUserOverrides(config, user));
-          // 额外宠物（pet pack）：pet/ 目录文件定义的宠物（自带完整动画池/权重）。
-          // host 已按同一套规则校验 + 过滤 id 冲突，这里信任其输出，不重复校验；
-          // 端点失败/缺失时仅主宠物运行（宿主日志已显式报错）。
-          let extra: Pet[] = [];
-          try {
-            const r3 = await fetch('/dsh-pet-7340/extra-pets');
-            if (r3.ok && r3.status !== 204) {
-              const body = await r3.json().catch(() => null);
-              if (body && Array.isArray(body.pets)) extra = body.pets as Pet[];
-            }
-          } catch {
-            /* extra-pets 拉取失败：仅主宠物运行 */
-          }
-          extrasRef.current = extra;
-          const merged = mergeExtraPets(config.pets, extrasRef.current);
+          // 唯一配置入口：host readAllConfig 的成品聚合（绝对正确、字段填满），一次拉取，零校验零兜底
+          const r = await fetch('/dsh-pet-7340/config');
+          if (!r.ok) throw new Error('config HTTP ' + r.status);
+          const merged = (await r.json()) as Record<string, Record<string, unknown>>;
+          const flattened = flattenConfigPets(merged);
           if (!alive) return;
-          petBridge.current = merged;
-          petBridge.template = defaults.length ? defaults[0] : undefined;
+          mainConfRef.current = merged.main ?? {};
+          mainRefreshRef.current = (merged.main?.eventsRefreshSec as Record<string, number> | undefined) ?? {};
+          // 文件宠物单独留一份：设置页保存/恢复默认后自动合并回来
+          extrasRef.current = flattened.filter((p) => p.extra);
+          petBridge.current = flattened;
+          // 「添加宠物」模板 = main 条目 pets[0]（内置默认或用户覆盖后的主宠物）
+          petBridge.template = Array.isArray(merged.main?.pets)
+            ? ((merged.main.pets as Pet[])[0] ?? undefined)
+            : undefined;
           petBridge.sync = (list: Pet[]) => {
-            // 设置页保存的是「可编辑宠物」列表（文件宠物已排除）；这里自动把文件宠物合并回来，
-            // 保证设置页保存/恢复默认后额外宠物仍然在线
-            const next = mergeExtraPets(list, extrasRef.current);
-            setPets(next);
+            // 设置页编辑的是 main 条目实例（裸实例，无条目级字段）：这里补吹 main 的
+            // 动画池/权重/周期（与 flattenConfigPets 同规格），再合并文件宠物
+            const mc = mainConfRef.current;
+            const filled: Pet[] = list.map((p) => ({
+              ...p,
+              animations: mc.animations as Animations,
+              animationWeights: mc.animationWeights as Weights,
+              eventsRefreshSec: mc.eventsRefreshSec as Record<string, number>,
+              assetRoot: 'main',
+              extra: false,
+            }));
+            const next = [...filled, ...extrasRef.current];
             petBridge.current = next;
+            setPets(next);
           };
-          setPets(merged);
+          setPets(flattened);
           setReady(true);
         } catch (e) {
-          console.error('[dsh-pet] 配置加载失败', e); // 配置缺失/损坏：显式报错，不静默隐藏
+          console.error('[dsh-pet] 配置加载失败', e); // 成品拉取失败：显式报错，不静默隐藏
         }
       })();
       return () => {
@@ -1111,7 +1111,7 @@ export function makePetUI(rt: {
         }
       };
       void refresh();
-      const intervalMs = Math.max(1000, (config.eventsRefreshSec?.balance ?? 1800) * 1000);
+      const intervalMs = Math.max(1000, (mainRefreshRef.current.balance ?? 1800) * 1000);
       const timer = window.setInterval(() => void refresh(), intervalMs);
       return () => {
         alive = false;
@@ -1158,7 +1158,7 @@ export function makePetUI(rt: {
       };
     }, [ready, anyBalanceEnabled]);
 
-    return ready ? visiblePets.map((p) => h(PetCard, { key: p.id, cfg: p, balance, balanceTick })) : null;
+    return ready ? visiblePets.map((p) => h(PetCard, { key: p.id, cfg: p as RuntimePet, balance, balanceTick })) : null;
   }
 
   return PetMulti;

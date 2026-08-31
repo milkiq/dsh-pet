@@ -1,34 +1,38 @@
 /**
  * dsh-pet 宿主半侧（host half）—— 宠物插件的"后端"部分
  *
- * 职责：在 DSH Web 服务器上注册 `/dsh-pet-7340/` 前缀路由，把宠物动画 WebM / 配置 JSONC
- * 流式返回给浏览器与桌面模式。
+ * 职责：在 DSH Web 服务器上注册 `/dsh-pet-7340/` 前缀路由。
+ * 全部配置（内置默认 + 用户主配置 + 文件宠物）由 ./config 的 readAllConfig 统一读取合并，
+ * 本文件只消费它的返回值（绝对正确、零校验），不再接触任何配置文件。
  *
  * 路由：
- *   /dsh-pet-7340/thumb/<宠物id>/<动画名>.webm  → 素材按宠物归属：
- *       main = $DSH_HOME/dsh-pet/main-animation/webm（用户目录，优先）→ 包内 assets/webm；
- *       额外宠物 = $DSH_HOME/dsh-pet/pet/<宠物id>-animation/（只查自己的，绝不回落）
- *   /dsh-pet-7340/extra-pets        → 额外宠物列表（pet/ 目录文件定义，实时扫描）
- *   /dsh-pet-7340/config.jsonc      → 插件包内 assets/config.jsonc（默认值，只读）
- *   /dsh-pet-7340/config              → 用户覆盖配置（pets / animations / animationWeights / notificationsEnabled，JSON）
- *                                GET 读取、PUT 保存、DELETE 恢复默认（删除用户层）
+ *   /dsh-pet-7340/config             → 合并后的**成品配置**（{ main:{...}, test1:{...}, ... }，
+ *                                每条目字段已填满；浏览器/桌面/设置页的唯一配置入口）
+ *                                GET 读取成品、PUT 保存用户层（白名单重建 main-config.json）、
+ *                                DELETE 删除用户层（恢复内置默认）
  *   /dsh-pet-7340/config/meta         → 配置文件与素材目录路径（设置页展示用）
- *   /dsh-pet-7340/balance             → 余额查询（浏览器/桌面共用）
- *   /dsh-pet-7340/balance/trigger     → 手动触发计数（/balance 命令 +1，两边同样的轻量轮询）
+ *   /dsh-pet-7340/thumb/<素材根>/<动画名>.webm  → 素材按宠物归属：
+ *       文件宠物 = $DSH_HOME/dsh-pet/pet/<素材根>-animation/（只查自己的，绝不回落）；
+ *       主宠物   = $DSH_HOME/dsh-pet/main-animation/webm（用户目录，优先）→ 包内 assets/webm
+ *   /dsh-pet-7340/whisper|whisper/trigger → 碎碎念周期/手动生成（按宠物独立，人设读成品）
+ *   /dsh-pet-7340/chat                → 对话与记忆（GET 最近窗口 / POST 对话并写 memory.json）
+ *   /dsh-pet-7340/broadcast            → /chat 命令触发的气泡广播（两端 1s 轻轮询）
+ *   /dsh-pet-7340/balance|balance/trigger → 余额查询 / 手动触发计数（/balance 命令 +1）
+ *   /dsh-pet-7340/font|pic             → 字体 / 通知图标素材
  *
  * 系统通知不属于宠物行为、不在这里：它是"监测 DSH 事件 → 弹系统 toast"的独立能力，
  * 天然只跟 DSH 网页端走（浏览器半侧 notify.ts，经 connection 事件流 + Web Notification API）。
  *
- * 桌面模式（Electron 透明窗）没有独立配置文件：宠物显示在哪全部由 pets[].display 决定
- * （web=仅浏览器 / desktop=仅桌面 / both=两者 / none=都不显示）。display 是 pets 必填字段，
- * client 端 assertClientConfig 与 PUT 的 sanitizeUserConfig 都严格校验，缺失/非法即显式报错。
+ * 桌面模式（Electron 透明窗）没有独立配置文件：宠物显示在哪全部由宠物条目的 display 决定
+ * （web=仅浏览器 / desktop=仅桌面 / both=两者 / none=都不显示；缺失时合并器填内置默认值）。
  *
- * 安全性：resolveAsset 做"防穿越"校验，保证路径仍在对应根目录内。
+ * 安全性：resolveAsset 做"防穿越"校验，保证路径仍在对应根目录内；
+ *         PUT 保存经 saveUserConfig 白名单重建，id 过滤文件名非法字符。
  *
  * TODO(类型)：peer 依赖类型包本地暂不可解析，ctx/req/res 暂用 any；
  *             依赖可解析后替换为 DSH 官方类型。
  */
-import { createReadStream, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { readFile, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, normalize, resolve, sep } from 'node:path';
@@ -38,6 +42,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials';
 import { queryBalance } from './balance';
 import { generateWhisper } from './whisper';
 import { generateChat, type ChatMemoryMessage } from './chat';
+import { findPetInstance, flattenPetList, readAllConfig, saveUserConfig, type ConfigPaths } from './config';
 import { HelperProcess, defaultElectronExe, ensureElectronDownload, resolveElectronPath } from './helper-process';
 
 /** 插件行 id（与 cordis.patch.yml 一致） */
@@ -94,23 +99,8 @@ async function sendFile(res: ServerResponse, file: string, contentType: string):
   stream.pipe(res);
 }
 
-/** 剥除 JSONC 注释（行注释 // 与块注释）得到纯 JSON 字符串。
- *  host 侧自包含实现：绝不 import client/shared 侧模块——两个入口一旦共享模块，
- *  tsdown 会把 bundle 拆成多文件 chunk，而 DSH 只按单文件加载 /plugins/dsh-pet/client.js，会加载失败。
- *  （src/shared/config.ts 里的同一份实现在 client 半侧；此处是受该约束豁免的极小拷贝，见 shared/index.ts 注释） */
-function stripJsonc(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^\\:])\/\/.*$/gm, '$1')
-    .trim();
-}
-
-/** 支持的角落白名单（与 client/shared 端一致） */
-const CORNERS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
-
-/** 显示位置白名单（与 shared/config.ts 一致；pets 必填字段，缺失即配置错误，不做兜底） */
-const PET_DISPLAYS = ['web', 'desktop', 'both', 'none'] as const;
-const PET_DISPLAY_SET: ReadonlySet<string> = new Set(PET_DISPLAYS);
+// 配置的读取/校验/合并/保存全部收敛在 ./config（readAllConfig / saveUserConfig，host 自包含实现，
+// 不 import src/shared —— DSH 单文件加载约束）。本文件不再保留任何配置逻辑，只消费成品返回值。
 
 /** 该宠物是否参与桌面模式（Electron 透明窗） */
 const isDesktopVisible = (display: unknown): boolean => display === 'desktop' || display === 'both';
@@ -135,251 +125,25 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-/** 校验并归一化用户配置：只接受 { pets: [...] }，可选顶层 notificationsEnabled（布尔） */
-function sanitizeUserConfig(raw: unknown): { pets: unknown[]; notificationsEnabled?: boolean } | null {
-  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const arr = Array.isArray(o.pets) ? o.pets : null;
-  if (!arr || !arr.length) return null;
-  const out: unknown[] = [];
-  for (const p of arr) {
-    if (!p || typeof p !== 'object') return null;
-    const pp = p as Record<string, unknown>;
-    const id = String(pp.id ?? '');
-    // 有意过滤文件名非法字符（Windows 保留符 + 控制字符），防止配置值逃逸 main-config.json 路径
-    // eslint-disable-next-line no-control-regex
-    if (!id || id.length > 64 || /[\\/:\x00-\x1f]/.test(id)) return null;
-    const size = Number(pp.size);
-    if (!Number.isFinite(size) || size <= 0) return null;
-    // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
-    let name = typeof pp.name === 'string' ? pp.name.trim() : '';
-    if (!name) {
-      console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
-      name = id;
-    }
-    const balanceEnabled = pp.balanceEnabled;
-    if (typeof balanceEnabled !== 'boolean') return null;
-    const whisperEnabled = pp.whisperEnabled;
-    if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') return null;
-    const display = String(pp.display ?? '');
-    if (!PET_DISPLAY_SET.has(display)) return null; // display 必填四值之一，缺失即配置错误
-    const pos = pp.position && typeof pp.position === 'object' ? (pp.position as Record<string, unknown>) : {};
-    const corner = String(pos.corner ?? '');
-    if (!CORNERS.includes(corner)) return null;
-    const marginX = Number(pos.marginX);
-    const marginY = Number(pos.marginY);
-    if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) return null;
-    out.push({ id, name, size, balanceEnabled, whisperEnabled, display, position: { corner, marginX, marginY } });
-  }
-  const ne = o.notificationsEnabled;
-  if (ne !== undefined && typeof ne !== 'boolean') return null;
-  const outConfig: { pets: unknown[]; notificationsEnabled?: boolean } = { pets: out };
-  if (ne !== undefined) outConfig.notificationsEnabled = ne;
-  return outConfig;
-}
-
 // ---------------------------------------------------------------------------
-// 额外宠物（pet pack）：用户数据根下 pet/<名>-config.json + pet/<名>-animation/
-// 的完整校验与扫描。host 侧自包含拷贝（不 import src/shared——DSH 单文件加载约束）。
+// 额外宠物（pet pack）说明：校验/扫描已收敛到 ./config（readAllConfig 内部逐字段合并），
+// 这里不再有 host 侧拷贝——文件宠物与主宠物一样，统一从 readAllConfig 的成品读取。
 // ---------------------------------------------------------------------------
 
-/** host 侧自包含：校验 animations 段（与 shared assertAnimationsBlock 同一套严格规则）；非法即 throw */
-function assertAnimationsHost(a: unknown): void {
-  if (!a || typeof a !== 'object') throw new Error('缺少 animations');
-  const anims = a as Record<string, unknown>;
-  for (const key of ['idle', 'turn', 'drag', 'clicks']) {
-    if (!Array.isArray(anims[key])) throw new Error('animations.' + key + ' 缺失');
-  }
-  const moves = anims.moves;
-  if (
-    !moves ||
-    typeof moves !== 'object' ||
-    typeof (moves as Record<string, unknown>).default !== 'object' ||
-    (moves as Record<string, unknown>).default === null ||
-    !Array.isArray((moves as Record<string, unknown>).actions)
-  ) {
-    throw new Error('animations.moves 结构非法');
-  }
-  if (!Array.isArray(anims.categories)) throw new Error('animations.categories 缺失');
-  const ev = anims.events;
-  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) throw new Error('缺少 animations.events');
-  const evEntries = ev as Record<string, unknown>;
-  for (const [eventName, pool] of Object.entries(evEntries)) {
-    if (!Array.isArray(pool) || pool.length === 0) {
-      throw new Error('animations.events.' + eventName + ' 必须是非空动画名数组');
-    }
-    for (const name of pool) {
-      if (typeof name !== 'string' || name.length === 0) {
-        throw new Error('animations.events.' + eventName + ' 含非法动画名');
-      }
-    }
-  }
-  const balance = evEntries.balance;
-  if (!Array.isArray(balance) || balance.length === 0) {
-    throw new Error('animations.events.balance 缺失或为空（余额事件必备）');
-  }
-}
-
-/** host 侧自包含：校验 animationWeights 段（idle/turn/move 三个非负数字）；非法即 throw */
-function assertWeightsHost(w: unknown): void {
-  if (!w || typeof w !== 'object') throw new Error('缺少 animationWeights');
-  const weights = w as Record<string, unknown>;
-  for (const key of ['idle', 'turn', 'move']) {
-    const v = Number(weights[key]);
-    if (!Number.isFinite(v) || v < 0) throw new Error('animationWeights.' + key + ' 非法');
-  }
-}
-
-/** 额外宠物配置的校验结果（raw 完整声明，含 animations / animationWeights / assetRoot） */
-interface ExtraPetValidated {
-  id: string;
-  /** 显示名（可重复）：与主宠物同一规则——缺失/留空按该宠物 id 处理并告警 */
-  name: string;
-  size: number;
-  balanceEnabled: boolean;
-  whisperEnabled: boolean;
-  display: string;
-  position: { corner: string; marginX: number; marginY: number };
-  /** 素材根（= 配置文件前缀 `<名>`，即 `pet/<名>-animation/`）：多实例共享同一素材目录 */
-  assetRoot: string;
-  /** 种类级人设提示词（顶层 whisperPrompt，与主配置同字段）：缺失回落全局，非法字符串报错 */
-  whisperPrompt?: string;
-  animations: unknown;
-  animationWeights: unknown;
-}
-
-/**
- * host 侧自包含：校验 `pet/<名>-config.json` 解析结果（与 shared assertExtraPetFile 同一套规则）。
- *
- * 该文件定义**一个「种类」**：animations / animationWeights 为该种类独有的动画池（不回落全局），
- * 素材目录为 `pet/<名>-animation/`（`<名>` = 文件名前缀）；pets 数组可放**任意多只实例**
- * （id 随意、互相唯一、逐只完整校验），每只打 assetRoot = 文件名前缀（多实例共享素材目录）。
- * 只校验「种类相关」字段（pets / animations / animationWeights，与主配置同一套规则）；
- * notificationsEnabled / eventsRefreshSec 是全局属性，不归宠物文件管（写了忽略、不写不报错）。
- * 任一不符即 throw（调用方跳过该宠物并显式报错）。
- */
-function assertExtraPetFileHost(raw: unknown, assetRoot: string): ExtraPetValidated[] {
-  if (!raw || typeof raw !== 'object') throw new Error('配置非对象');
-  const cfg = raw as Record<string, unknown>;
-  // ---- animations / animationWeights（完整校验，与主配置同一套规则）----
-  assertAnimationsHost(cfg.animations);
-  assertWeightsHost(cfg.animationWeights);
-  // ---- 种类级人设提示词（顶层 whisperPrompt，与主配置同字段；非字符串非法、缺失回落全局）----
-  const whisperPrompt = cfg.whisperPrompt;
-  if (whisperPrompt !== undefined && (typeof whisperPrompt !== 'string' || whisperPrompt.length === 0)) {
-    throw new Error('whisperPrompt 非法（需非空字符串）');
-  }
-  // ---- pets（数组非空；数组内 id 唯一 + 逐只完整校验）----
-  const petsArr = cfg.pets;
-  if (!Array.isArray(petsArr) || !petsArr.length) throw new Error('缺少 pets');
-  const seen = new Set<string>();
-  const out: ExtraPetValidated[] = [];
-  for (const rawPet of petsArr) {
-    const pet = rawPet as Record<string, unknown> | null;
-    const id = String(pet?.id ?? '');
-    if (!id || seen.has(id)) throw new Error('pet id 非法或重复「' + id + '」');
-    // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
-    let name = typeof pet?.name === 'string' ? pet.name.trim() : '';
-    if (!name) {
-      console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
-      name = id;
-    }
-    const size = Number(pet?.size);
-    if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
-    const balanceEnabled = pet?.balanceEnabled;
-    if (typeof balanceEnabled !== 'boolean') throw new Error(`pet「${id}」缺少 balanceEnabled`);
-    const whisperEnabled = pet?.whisperEnabled;
-    if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean')
-      throw new Error(`pet「${id}」whisperEnabled 非法（需布尔值 true/false）`);
-    const display = String(pet?.display ?? '');
-    if (!PET_DISPLAY_SET.has(display)) throw new Error(`pet「${id}」display 非法（需 web/desktop/both/none）`);
-    const pos =
-      pet && typeof pet.position === 'object' && pet.position !== null ? (pet.position as Record<string, unknown>) : {};
-    const corner = String(pos.corner ?? '');
-    if (!CORNERS.includes(corner)) throw new Error(`pet「${id}」corner 非法`);
-    const marginX = Number(pos.marginX);
-    const marginY = Number(pos.marginY);
-    if (!Number.isFinite(marginX) || !Number.isFinite(marginY)) throw new Error(`pet「${id}」边距非法`);
-    seen.add(id);
-    out.push({
-      id,
-      name,
-      size,
-      balanceEnabled,
-      whisperEnabled: whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled,
-      display,
-      position: { corner, marginX, marginY },
-      assetRoot,
-      whisperPrompt,
-      animations: cfg.animations,
-      animationWeights: cfg.animationWeights,
-    });
-  }
-  return out;
-}
-
-/**
- * 扫描用户数据根 pet/ 目录，发现全部**合法且完整**的额外宠物。
- * 规则（与复述一致）：
- *  - 文件名 `pet/<名>-config.(json|jsonc)` → id = <名>；id 与动画目录 `pet/<名>-animation/` 同前缀配对
- *  - 动画目录必须存在为目录，否则报错跳过（素材只查自己的，绝不回落）
- *  - 配置缺失/非法 → 显式报错并跳过该宠物（不拖垮其他宠物）
- *  - 同一 id 配置文件重复 → 报错跳过后者
- * 返回按文件名排序的合法宠物（pure 数据，无环境引用）。
- */
-function scanExtraPets(userRoot: string, log: { error?: (...args: unknown[]) => void }): ExtraPetValidated[] {
-  const petRoot = join(userRoot, 'pet');
-  let entries;
-  try {
-    entries = readdirSync(petRoot, { withFileTypes: true });
-  } catch {
-    return []; // pet/ 目录不存在 = 无额外宠物
-  }
-  const out: ExtraPetValidated[] = [];
-  const seen = new Set<string>();
-  const files = entries
-    .filter((e) => e.isFile())
-    .map((e) => e.name)
-    .filter((name) => /^.+?-config\.(json|jsonc)$/.test(name))
-    .sort();
-  for (const name of files) {
-    const id = name.replace(/-config\.(json|jsonc)$/, '');
-    const why = (msg: string): void => {
-      log.error?.(`dsh-pet: 额外宠物「${id}」（${name}）${msg}，已跳过（不影响其他宠物）`);
-    };
-    if (seen.has(id)) {
-      why('配置文件重复');
-      continue;
-    }
-    const animDir = join(petRoot, id + '-animation');
-    if (!existsSync(animDir)) {
-      why('缺少动画目录 ' + animDir + '（素材只查自己的，不回落全局）');
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stripJsonc(readFileSync(join(petRoot, name), 'utf8')));
-    } catch (e) {
-      why('配置解析失败：' + (e instanceof Error ? e.message : String(e)));
-      continue;
-    }
-    try {
-      const pets = assertExtraPetFileHost(parsed, id);
-      seen.add(id);
-      out.push(...pets); // 一个文件 = 一个种类：pets 数组多只实例展开进统一列表
-    } catch (e) {
-      why('配置非法：' + (e instanceof Error ? e.message : String(e)));
-    }
-  }
-  return out;
-}
-
-/** 宿主插件主体：注册 `/dsh-pet-7340` 前缀路由 + 系统通知事件队列。 */
+/** 宿主插件主体：注册 `/dsh-pet-7340` 前缀路由 + 斜杠命令（/balance /pet /chat）。 */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- DSH 注入的 ctx（webServer/locale 等 service 无静态类型）
 export function apply(ctx: any): void {
   // 用户数据根：配置与用户素材统一收敛于此（扩展包按 <插件id> 各自建目录）
   const userRoot = join(resolveDshHome(), 'dsh-pet');
-  // 用户覆盖配置（pets / animations / animationWeights / notificationsEnabled 覆盖片段）
+  // 用户主配置（可编辑层）与文件宠物目录；配置读取/合并统一走 readAllConfig（./config）
   const userConfigPath = join(userRoot, 'main-config.json');
+  const petConfigDir = join(userRoot, 'pet');
+  // 配置路径集（readAllConfig 的唯一输入：内置默认 + 用户主配置 + 文件宠物目录）
+  const configPaths: ConfigPaths = {
+    defaultFile: join(PACKAGE_ROOT, 'assets', 'config.jsonc'),
+    userFile: userConfigPath,
+    petDir: petConfigDir,
+  };
   // 用户动画目录（thumb 播放时优先于包内素材；唯一格式 webm，素材放 main-animation/webm/）
   const thumbUserRoot = join(userRoot, 'main-animation');
   // 手动触发计数：/balance 命令 +1，两边（浏览器/桌面）同样的 1s 轮询检测变化后刷新余额（进程内内存态，重启归零）
@@ -440,19 +204,41 @@ export function apply(ctx: any): void {
     return run;
   };
 
+  // ---- 配置消费：唯一入口 readAllConfig（./config）——返回值绝对正确，这里只读字段，零校验 ----
+
+  /** 某宠物的最终人设 system：所属条目（非文件宠物 → main 条目）的 whisperPrompt（合并器已填默认）
+   *  + 无条件追加一句名字声明（name，缺失已按 id）——碎碎念与对话共用同一拼装。 */
+  const petSystemPrompt = (petId: string, cfg: Record<string, Record<string, unknown>>): string => {
+    const found = findPetInstance(cfg, petId);
+    const conf = found ? found.conf : (cfg.main ?? {});
+    const prompt = typeof conf.whisperPrompt === 'string' ? conf.whisperPrompt : '';
+    const name = found ? String(found.pet.name || found.pet.id || petId) : petId;
+    const nameLine = '你的名字是“' + name + '”。';
+    return prompt ? prompt + '\n' + nameLine : nameLine;
+  };
+
+  /** 对话记忆轮数（1 轮 = 1 问 1 答）：所属条目/主条目的 chatMemoryRounds（合并器已填默认非负数字） */
+  const memoryRounds = (petId: string, cfg: Record<string, Record<string, unknown>>): number => {
+    const found = findPetInstance(cfg, petId);
+    const v = Number(found?.conf.chatMemoryRounds ?? cfg.main?.chatMemoryRounds);
+    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 5;
+  };
+
   /** 生成/返回某宠物的一句碎碎念（周期 GET 与菜单手动触发共用的同一逻辑）：
-   *  按宠物独立生成（文件宠物用自己种类的人设），缓存按 pet 分开；
+   *  每只宠物独立生成（所属条目的人设），缓存按 pet 分开；
    *  force=false 走周期节流（缓存期内返回同一句 ts），force=true 强制新生成并刷新缓存
    *  （右键菜单「碎碎念」手动触发：绕过节流立即新出一句，同宠多端下次轮询看到新 ts 一起展示）。 */
   const serveWhisper = async (
     petId: string,
     force: boolean,
   ): Promise<{ ok: boolean; text?: string; ts?: number; reason?: string; message?: string }> => {
-    const merged = readMergedConfig();
-    const ers = merged.eventsRefreshSec as Record<string, unknown> | undefined;
+    const cfg = readAllConfig(configPaths);
+    const found = findPetInstance(cfg, petId);
+    const conf = found ? found.conf : (cfg.main ?? {});
+    // 所属条目的碎碎念周期（合并器已填内置默认，必为正数秒）
+    const ers = conf.eventsRefreshSec as Record<string, unknown> | undefined;
     const intervalSec = ers && typeof ers.whisper === 'number' ? ers.whisper : 3600;
-    // 该宠物的人设：文件宠物优先用自己的种类人设，否则回落合并配置顶层；再无条件追加名字声明
-    const system = petSystemPrompt(petId, merged);
+    const system = petSystemPrompt(petId, cfg);
     const now = Date.now();
     const cached = whisperCache.get(petId);
     if (!force && cached && now - cached.ts < intervalSec * 1000) {
@@ -466,165 +252,6 @@ export function apply(ctx: any): void {
     return { ok: true, text: result.text, ts: now };
   };
 
-  // 桌面宠物 = display 含 desktop 的第一只（桌面窗口会渲染全部 desktop/both 宠物，
-  // 这里只需判定「是否存在」以决定是否拉起 Helper；大小由宠物自己的配置决定，宿主不再传）。
-  const validatePets = (arr: unknown[]): Record<string, unknown>[] =>
-    arr.map((p, index) => {
-      const pet = p as Record<string, unknown> | null;
-      const id = String(pet?.id ?? '');
-      if (!id) throw new Error(`pets[${index}] 缺少 id`);
-      // 显示名：可重复不校验唯一；缺失/留空/非字符串 → 按该宠物 id 处理（兼容旧配置）并告警
-      const rawName = pet?.name;
-      let name = typeof rawName === 'string' ? rawName.trim() : '';
-      if (!name) {
-        console.warn(`dsh-pet: pet「${id}」缺少 name，已按默认 ${id}（宠物 id）处理`);
-        name = id;
-      }
-      const size = Number(pet?.size);
-      if (!Number.isFinite(size) || size <= 0) throw new Error(`pet「${id}」size 非法`);
-      // ≤0.2.0 旧配置无 display：缺失按默认「both」处理并警告；写了但非法仍报错
-      const display = pet?.display;
-      if (display === undefined || display === null) {
-        console.warn(`dsh-pet: pet「${id}」缺少 display，已按默认 both 处理`);
-      } else if (typeof display !== 'string' || !PET_DISPLAY_SET.has(display)) {
-        throw new Error(`pet「${id}」display 非法（需 web/desktop/both/none 之一）`);
-      }
-      const effectiveDisplay: string = display === undefined || display === null ? 'both' : String(display);
-      // 碎碎念开关：缺失按默认 true（开启）处理并警告；写了但非法仍报错
-      const whisperEnabled = pet?.whisperEnabled;
-      if (whisperEnabled !== undefined && typeof whisperEnabled !== 'boolean') {
-        throw new Error(`pet「${id}」whisperEnabled 非法（需布尔值 true/false）`);
-      }
-      const effectiveWhisper: boolean = whisperEnabled === undefined || whisperEnabled === null ? true : whisperEnabled;
-      return { ...pet, name, display: effectiveDisplay, whisperEnabled: effectiveWhisper };
-    });
-
-  /** 主宠物列表：用户层（main-config.json）优先，否则包内 config.jsonc */
-  const readMainPets = (): Record<string, unknown>[] => {
-    if (existsSync(userConfigPath)) {
-      try {
-        const raw = JSON.parse(readFileSync(userConfigPath, 'utf8')) as Record<string, unknown>;
-        if (Array.isArray(raw.pets) && raw.pets.length > 0) return validatePets(raw.pets);
-      } catch (e) {
-        ctx.logger?.warn?.(
-          `dsh-pet: 用户配置非法（${e instanceof Error ? e.message : String(e)}），桌面模式回落默认配置`,
-        );
-      }
-    }
-    const cfgFile = join(PACKAGE_ROOT, 'assets', 'config.jsonc');
-    const raw = JSON.parse(stripJsonc(readFileSync(cfgFile, 'utf8'))) as Record<string, unknown>;
-    if (!Array.isArray(raw.pets) || raw.pets.length === 0) throw new Error('config.jsonc 缺少 pets');
-    return validatePets(raw.pets);
-  };
-
-  /** 合并配置顶层字段（用户层 main-config.json 优先 → 包内 config.jsonc 回落）：
-   *  碎碎念用（whisperPrompt 人设 + eventsRefreshSec.whisper 周期）。 */
-  const readMergedConfig = (): Record<string, unknown> => {
-    let merged: Record<string, unknown> = {};
-    try {
-      merged = JSON.parse(stripJsonc(readFileSync(join(PACKAGE_ROOT, 'assets', 'config.jsonc'), 'utf8'))) as Record<
-        string,
-        unknown
-      >;
-    } catch {
-      /* 包内配置缺失：维持空对象，调用方回落默认 */
-    }
-    if (existsSync(userConfigPath)) {
-      try {
-        const user = JSON.parse(readFileSync(userConfigPath, 'utf8')) as Record<string, unknown>;
-        if (user.whisperPrompt !== undefined) merged.whisperPrompt = user.whisperPrompt;
-        if (user.eventsRefreshSec !== undefined) merged.eventsRefreshSec = user.eventsRefreshSec;
-      } catch {
-        /* 用户配置非法：忽略，保持包内默认 */
-      }
-    }
-    return merged;
-  };
-
-  /** 读取某只宠物的种类人设：从有效宠物列表找到该实例的 assetRoot（多实例共享种类文件），
-   *  再读 pet/<assetRoot>-config.json 顶层 whisperPrompt；非文件宠物/缺失返回 undefined（回落全局）。 */
-  const readPetWhisperPrompt = (petId: string): string | undefined => {
-    let assetRoot: string | undefined;
-    try {
-      const eff = readEffectivePets();
-      const found = eff.find((p) => String(p.id) === petId);
-      assetRoot = found ? String((found as { assetRoot?: unknown }).assetRoot ?? '') : '';
-    } catch {
-      return undefined; // 有效宠物列表解析失败：回落全局人设
-    }
-    if (!assetRoot) return undefined;
-    const file = join(userRoot, 'pet', assetRoot + '-config.json');
-    if (!existsSync(file)) return undefined;
-    try {
-      const raw = JSON.parse(stripJsonc(readFileSync(file, 'utf8'))) as Record<string, unknown>;
-      return typeof raw.whisperPrompt === 'string' && raw.whisperPrompt ? raw.whisperPrompt : undefined;
-    } catch {
-      return undefined; // 配置解析失败：回落全局人设
-    }
-  };
-
-  /** 某宠物的显示名（name，可重复）：有效列表里该实例的 name；缺失/解析失败回落实例 id */
-  const readPetName = (petId: string): string => {
-    try {
-      const found = readEffectivePets().find((p) => String(p.id) === petId);
-      if (found) {
-        const n = String((found as { name?: unknown }).name ?? '').trim();
-        if (n) return n;
-      }
-    } catch {
-      /* 有效宠物列表解析失败：回退 id */
-    }
-    return petId;
-  };
-
-  /** 某宠物的最终人设 system：人设提示词（种类文件 → 全局，同 whisperPrompt 回落链）
-   *  + 无条件追加一句名字声明（name 字段，缺失回落 id）——碎碎念与对话共用同一拼装。 */
-  const petSystemPrompt = (petId: string, merged: Record<string, unknown>): string => {
-    const base =
-      (petId ? readPetWhisperPrompt(petId) : undefined) ??
-      (typeof merged.whisperPrompt === 'string' && merged.whisperPrompt ? merged.whisperPrompt : '');
-    const nameLine = '你的名字是“' + readPetName(petId) + '”。';
-    return base ? base + '\n' + nameLine : nameLine;
-  };
-
-  /** 某宠物的种类桶（= assetRoot，多实例共享）；非文件宠物（主宠物）回落实例 id 本身 */
-  const petAssetRoot = (petId: string): string | undefined => {
-    try {
-      const found = readEffectivePets().find((p) => String(p.id) === petId);
-      return found ? String((found as { assetRoot?: unknown }).assetRoot ?? '') || petId : petId;
-    } catch {
-      return petId; // 列表解析失败：按实例 id 独立成桶
-    }
-  };
-
-  /** 对话记忆轮数（一次请求携带的历史轮数，1 轮 = 1 问 1 答）：
-   *  回落链同 whisperPrompt —— 种类文件 pet/<名>-config.json 顶层 → 合并配置顶层 → 默认 5；
-   *  缺失静默默认（兼容旧配置），写了非法（非负数字）才显式报错。 */
-  const resolveMemoryRounds = (petId: string, merged: Record<string, unknown>): number => {
-    let fromKind: unknown;
-    const assetRoot = petAssetRoot(petId);
-    if (assetRoot) {
-      const file = join(userRoot, 'pet', assetRoot + '-config.json');
-      if (existsSync(file)) {
-        try {
-          const raw = JSON.parse(stripJsonc(readFileSync(file, 'utf8'))) as Record<string, unknown>;
-          fromKind = raw.chatMemoryRounds;
-        } catch {
-          /* 种类配置解析失败：回落全局 */
-        }
-      }
-    }
-    const value = fromKind !== undefined ? fromKind : merged.chatMemoryRounds;
-    if (value !== undefined) {
-      const n = Number(value);
-      if (!Number.isFinite(n) || n < 0) {
-        throw new Error('chatMemoryRounds 非法（需非负数字，或省略用默认 5）');
-      }
-      return Math.floor(n);
-    }
-    return 5;
-  };
-
   /** 与某只宠物对话：截取最近记忆 → 生成回复 → 写入记忆 → 返回 {reply,ts}。
    *  供 /chat 端点（POST）与 /chat 命令共用同一条路径（锁内读写，防两端交错写盘）。 */
   const chatWithPet = async (
@@ -635,12 +262,12 @@ export function apply(ctx: any): void {
     | { ok: false; reason: 'provider-missing' | 'generate-error'; message?: string }
   > =>
     withMemoryLock(async () => {
-      const merged = readMergedConfig();
-      const rounds = resolveMemoryRounds(petId, merged);
-      // 人设：种类文件优先用自己的，否则回落合并配置顶层（与碎碎念同一回落链），再无条件追加名字声明
-      const system = petSystemPrompt(petId, merged);
+      const cfg = readAllConfig(configPaths);
+      const rounds = memoryRounds(petId, cfg);
+      // 人设：所属条目的 whisperPrompt（合并器已填默认）+ 名字声明（与碎碎念同一拼装）
+      const system = petSystemPrompt(petId, cfg);
       const mem = await readMemory();
-      const bucketKey = petAssetRoot(petId) ?? petId;
+      const bucketKey = findPetInstance(cfg, petId)?.entry ?? petId;
       const bucket = (mem[bucketKey] ??= {});
       const entry = (bucket[petId] ??= { messages: [] });
       const list = entry.messages.slice().slice(-rounds * 2);
@@ -654,21 +281,10 @@ export function apply(ctx: any): void {
     });
 
   /**
-   * 当前生效宠物列表 = 主宠物 + 额外宠物（pet/ 文件定义）。
-   * 额外宠物 id 与主宠物列表冲突 → 显式报错并跳过（同名宠物绝不静默覆盖）。
+   * 当前生效宠物列表 = readAllConfig 成品拍平（main + 文件宠物全部条目；合并器已保证 id 唯一、
+   * 字段填满），命令与桌面模式都从这里取。
    */
-  const readEffectivePets = (): Record<string, unknown>[] => {
-    const main = readMainPets();
-    const mainIds = new Set(main.map((p) => String(p.id)));
-    const extra = scanExtraPets(userRoot, ctx.logger ?? console).filter((e) => {
-      if (mainIds.has(e.id)) {
-        ctx.logger?.error?.(`dsh-pet: 额外宠物 id「${e.id}」与主宠物列表冲突，已跳过（不覆盖同名宠物）`);
-        return false;
-      }
-      return true;
-    });
-    return [...main, ...extra] as Record<string, unknown>[];
-  };
+  const effectivePetList = (): Record<string, unknown>[] => flattenPetList(readAllConfig(configPaths));
 
   /** 命令触发的展示气泡：/chat 命令写入（两端 1s 轮询 /broadcast 拉取展示）；覆盖手动触发场景 */
   const broadcastTo = (petId: string, text: string): void => {
@@ -678,7 +294,7 @@ export function apply(ctx: any): void {
   /** 当前交互桌宠 id：/pet 已选且仍存在 → 该宠物；未选/已失效 → 有效宠物列表第一只（进程内，重启回默认） */
   const resolveActivePetId = (): string => {
     try {
-      const eff = readEffectivePets();
+      const eff = effectivePetList();
       if (eff.length === 0) return '';
       if (activePetId && eff.some((p) => String(p.id) === activePetId)) return activePetId;
       return String(eff[0].id);
@@ -697,7 +313,7 @@ export function apply(ctx: any): void {
   const refreshDesktop = (): void => {
     hasDesktopPet = false;
     try {
-      hasDesktopPet = readEffectivePets().some((p) => isDesktopVisible(p.display));
+      hasDesktopPet = effectivePetList().some((p) => isDesktopVisible(p.display));
     } catch (e) {
       ctx.logger?.warn?.(`[dsh-pet] 宠物配置非法，桌面模式已跳过：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -707,7 +323,7 @@ export function apply(ctx: any): void {
   /** 桌面可见宠物列表（[{id,size}]）：透传 Helper 决定创建几个局部窗口（每宠物一个）。 */
   const desktopPetList = (): Array<{ id: string; size: number }> => {
     try {
-      return readEffectivePets()
+      return effectivePetList()
         .filter((p) => isDesktopVisible(p.display))
         .map((p) => ({ id: String(p.id), size: Number(p.size) }));
     } catch {
@@ -737,7 +353,8 @@ export function apply(ctx: any): void {
       return;
     }
     const origin = `http://127.0.0.1:${port}`;
-    const configUrl = `${origin}${ROUTE_PREFIX}/config.jsonc`;
+    // 桌面渲染端也从 /config 拿同一份成品配置（每只宠物一个局部小窗口）
+    const configUrl = `${origin}${ROUTE_PREFIX}/config`;
     helper = new HelperProcess(
       {
         electronPath,
@@ -817,14 +434,15 @@ export function apply(ctx: any): void {
           const url = new URL(req.url ?? '/', 'http://localhost');
           const rest = decodeURIComponent(url.pathname.slice(ROUTE_PREFIX.length + 1));
 
-          // 用户覆盖配置：/dsh-pet-7340/config（GET / PUT / DELETE）
+          // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / DELETE 恢复默认）
           if (rest === 'config') {
             if (req.method === 'GET') {
+              // 唯一配置入口：readAllConfig 返回绝对正确的完成品聚合（{ main:{...}, test1:{...} }），
+              // 浏览器/桌面/设置页直接消费，无需任何校验/兜底
               try {
-                const raw = await readFile(userConfigPath, 'utf8');
-                sendJson(res, 200, JSON.parse(raw));
-              } catch {
-                sendJson(res, 200, {}); // 无覆盖配置 → 空对象，client 回落默认
+                sendJson(res, 200, readAllConfig(configPaths));
+              } catch (e) {
+                sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
               }
               return;
             }
@@ -832,7 +450,7 @@ export function apply(ctx: any): void {
               try {
                 const body = await readBody(req);
                 const parsed = JSON.parse(body);
-                const clean = sanitizeUserConfig(parsed);
+                const clean = saveUserConfig(parsed);
                 if (!clean) {
                   sendJson(res, 400, {
                     error:
@@ -911,8 +529,8 @@ export function apply(ctx: any): void {
           }
 
           // 碎碎念周期文本：/dsh-pet-7340/whisper?pet=<id>（GET，浏览器/桌面共用）
-          // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**自己种类的人设**生成一句话
-          // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = 合并配置顶层 whisperPrompt）。
+          // 按宠物独立生成：每只启用碎碎念的宠物在自己的周期用**所属条目的人设**生成一句话
+          // （文件宠物 = pet/<名>-config.json 顶层 whisperPrompt；主宠物 = main 条目即内置默认）。
           // 节流/缓存按 pet 分开：同一宠物周期内重复请求返回同一句（ts 不变，client 检测变化才触发），
           // 同一宠物的多个端（浏览器+桌面窗口）共享一句，不重复调 LLM。
           if (rest === 'whisper') {
@@ -959,15 +577,16 @@ export function apply(ctx: any): void {
           //   POST —— 携带历史生成回复并写入记忆（{text} → {ok, reply, ts}）
           // 记忆唯一读写方 = host（memory.json；浏览器/桌面两端都只是客户端）→
           // 同一实例的浏览器与桌面天然共享同一份记忆；文件全存不删，
-          // 请求只截尾部 chatMemoryRounds 轮（1 轮 = 1 问 1 答；种类→全局→默认 5）。
+          // 请求只截尾部 chatMemoryRounds 轮（1 轮 = 1 问 1 答；合并器已按条目填默认）。
           if (rest === 'chat') {
             const petId = String(url.searchParams.get('pet') ?? '');
             try {
               if (req.method === 'GET') {
+                const cfg = readAllConfig(configPaths);
                 const mem = await readMemory();
-                const bucket = mem[petAssetRoot(petId) ?? petId] ?? {};
+                const bucket = mem[findPetInstance(cfg, petId)?.entry ?? petId] ?? {};
                 const list = (bucket[petId]?.messages ?? []).slice();
-                const rounds = resolveMemoryRounds(petId, readMergedConfig());
+                const rounds = memoryRounds(petId, cfg);
                 sendJson(res, 200, { ok: true, messages: list.slice(-rounds * 2), rounds });
                 return;
               }
@@ -989,11 +608,10 @@ export function apply(ctx: any): void {
               sendJson(res, 405, { error: 'method not allowed' });
               return;
             } catch (e) {
-              // 配置非法（chatMemoryRounds 等）→ config-error；其余（LLM/IO）→ generate-error
-              const isConfig = e instanceof Error && /chatMemoryRounds/.test(String(e.message));
+              // 配置已由 readAllConfig 保证正确（不再有 config-error 分支）；其余（IO/LLM）→ generate-error
               sendJson(res, 200, {
                 ok: false,
-                reason: isConfig ? 'config-error' : 'generate-error',
+                reason: 'generate-error',
                 message: e instanceof Error ? e.message : String(e),
               });
             }
@@ -1011,46 +629,6 @@ export function apply(ctx: any): void {
             const petId = String(url.searchParams.get('pet') ?? '');
             const hit = broadcastCache.get(petId);
             sendJson(res, 200, { ok: true, text: hit?.text ?? '', ts: hit?.ts ?? 0 });
-            return;
-          }
-
-          // 配置文件（JSONC）：/dsh-pet-7340/config.jsonc → 包内 assets/config.jsonc
-          if (rest === 'config.jsonc') {
-            const cfgFile = join(PACKAGE_ROOT, 'assets', 'config.jsonc');
-            if (!existsSync(cfgFile)) {
-              res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-              res.end('dsh-pet: config.jsonc not found');
-              return;
-            }
-            await sendFile(res, cfgFile, MIME['.jsonc'] ?? 'application/octet-stream');
-            return;
-          }
-
-          // 额外宠物（pet pack）：/dsh-pet-7340/extra-pets → 扫描 pet/ 目录的合法文件宠物
-          // （每次实时扫描：添加/修改 `pet/<名>-config.json` 刷新即生效，无需重启）。
-          // 返回 { pets: [{id,size,balanceEnabled,display,position,animations,animationWeights}] }，
-          // 与主宠物列表 id 冲突的已在宿主过滤（报错跳过）；客户端合并进宠物列表并打 extra 标记。
-          if (rest === 'extra-pets') {
-            if (req.method !== 'GET') {
-              sendJson(res, 405, { error: 'method not allowed' });
-              return;
-            }
-            const main = (() => {
-              try {
-                return readMainPets();
-              } catch {
-                return []; // 默认配置缺失：仅影响冲突检测（无主宠物可冲突）
-              }
-            })();
-            const mainIds = new Set(main.map((p) => String(p.id)));
-            const extra = scanExtraPets(userRoot, ctx.logger ?? console).filter((e) => {
-              if (mainIds.has(e.id)) {
-                ctx.logger?.error?.(`dsh-pet: 额外宠物 id「${e.id}」与主宠物列表冲突，已跳过（不覆盖同名宠物）`);
-                return false;
-              }
-              return true;
-            });
-            sendJson(res, 200, { pets: extra });
             return;
           }
 
@@ -1157,7 +735,7 @@ export function apply(ctx: any): void {
           const arg = rawInput.trim();
           let eff: Record<string, unknown>[];
           try {
-            eff = readEffectivePets();
+            eff = effectivePetList();
           } catch {
             eff = [];
           }

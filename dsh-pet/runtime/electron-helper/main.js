@@ -64,7 +64,7 @@ function petWindowSize(size) {
 
 function createPetWindows() {
   const area = screen.getPrimaryDisplay().workArea;
-  const configUrl = process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config.jsonc';
+  const configUrl = process.env.DSH_PET_CONFIG_URL || 'http://127.0.0.1:3080/dsh-pet-7340/config';
   const pets = petsFromEnv();
   for (const pet of pets) {
     const { width, height } = petWindowSize(pet.size);

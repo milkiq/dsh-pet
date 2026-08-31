@@ -3,8 +3,8 @@
 // 这是**独立于宠物**的能力（监测 DSH 事件 → 弹 toast），天然只随 DSH 网页端走；
 // 桌面模式是宠物本体，不做宠物无关的功能——「两端一致」只约束宠物行为。
 // 行为（帧 → 文案）来自 src/shared/notify.ts（单一来源）。
-// 单一总开关：读 config.jsonc 的 notificationsEnabled；纯副作用模块，无 react 依赖，
-// 由 app.ts 装配层启动。
+// 单一总开关：读成品配置（GET /dsh-pet-7340/config）main 条目的 notificationsEnabled；纯副作用模块，
+// 无 react 依赖，由 app.ts 装配层启动。
 //
 // 触发清单（与 DSH 事件契约一一对应，见 shared/notify.ts）：
 //   - 对话完成 / 生成失败 / 输出截断（turn/end reason.kind）
@@ -13,8 +13,6 @@
 //   - 用户选择（question/requested）
 // 过滤：aborted / interrupted 不弹；重连重放的 approval/question 帧按 rpcId 去重。
 
-import { applyUserOverrides, assertClientConfig, stripJsonc } from '../shared/config';
-import type { UserOverrides } from '../shared/config';
 import { frameToToast, truncate, NOTIFY_ICONS as ICON_NAMES, type NotifyFrame } from '../shared/notify';
 
 // ---------- 聚焦门：仅在页面不可见/失焦时弹 ----------
@@ -116,24 +114,16 @@ export async function requestNotificationPermission(): Promise<PermissionResult>
   }
 }
 
-// ---------- 总开关：用户层配置优先，缺省回落默认配置 ----------
+// ---------- 总开关：成品配置 main 条目的 notificationsEnabled（合并器已按用户层/默认填好） ----------
 
-/** 读取系统通知总开关：与宠物配置同一条合并路径（用户层 main-config.json 优先，缺省回落默认）；
+/** 读取系统通知总开关：读成品聚合 main 条目（用户层优先、缺省回落默认，host 已合并好）；
  * 拉取/解析失败时不阻塞（默认开启）。 */
 async function readNotificationsEnabled(): Promise<boolean> {
   try {
-    const base = assertClientConfig(JSON.parse(stripJsonc(await (await fetch('/dsh-pet-7340/config.jsonc')).text())));
-    let user: UserOverrides = {};
-    try {
-      const r = await fetch('/dsh-pet-7340/config');
-      if (r.ok && r.status !== 204) {
-        const parsed = await r.json().catch(() => null);
-        if (parsed && typeof parsed === 'object') user = parsed as UserOverrides;
-      }
-    } catch {
-      /* 无用户层时忽略 */
-    }
-    return applyUserOverrides(base, user).notificationsEnabled;
+    const r = await fetch('/dsh-pet-7340/config');
+    if (!r.ok) return true;
+    const d = (await r.json().catch(() => null)) as { main?: { notificationsEnabled?: unknown } } | null;
+    return typeof d?.main?.notificationsEnabled === 'boolean' ? d.main.notificationsEnabled : true;
   } catch {
     return true;
   }

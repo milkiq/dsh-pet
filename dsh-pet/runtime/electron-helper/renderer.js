@@ -2,11 +2,12 @@
  * dsh-pet desktop helper renderer —— 每只桌面宠物一个独立局部小窗口里的宠物本体。
  *
  * 与浏览器 overlay 严格对齐（宠物行为/文案完全一致）：
- *   - 纯逻辑（常量/选择器/移动几何/余额折算/配置校验）来自 shared-core.js
+ *   - 纯逻辑（常量/选择器/移动几何/余额折算/拍平）来自 shared-core.js
  *     （= src/shared 的构建产物，window.PetShared）——与浏览器 bundle 共用同一份源码；
- *   - 配置唯一来源 config.jsonc + 用户覆盖层（/config 合并），加载失败**大声报错**并显示红色错误条
- *     （每 5s 自动重试），绝无静默兜底池；
- *   - 动画素材经宿主 /dsh-pet-7340/thumb/<宠物id>/<name>.webm（素材根按宠物归属；
+ *   - 配置唯一来源 = 宿主 /dsh-pet-7340/config 的**成品聚合**（host readAllConfig 合并，
+ *     绝对正确、字段填满）：一步 fetch → S.flattenConfigPets 拍平，加载失败**大声报错**
+ *     并显示红色错误条（每 5s 自动重试），绝无静默兜底池；
+ *   - 动画素材经宿主 /dsh-pet-7340/thumb/<素材根>/<name>.webm（素材根 = 条目 key）；
  *   - 几何模型：窗口 = 宠物包围盒 + 四周外扩余量（WINDOW_MARGIN_RATIO，为气泡/弹窗预留空间）。
  *     sprite 固定在窗口内 (margin.l, margin.t) 处，宠物的"移动"由本页把目标屏幕位置
  *     逐帧上报（petBridge.setBounds）→ 主进程按 sprite 位置 + 外扩余量移动窗口；
@@ -17,7 +18,7 @@
  *     菜单开启期间整窗保持可交互（悬停菜单不触发穿透翻转），关闭/离开窗口即恢复穿透。
  *   - 系统通知不是宠物行为（浏览器半侧 notify.ts 负责），桌面端不重复实现。
  *
- * 端点全部由 configUrl 推导：balance / balance/trigger / thumb / font / pic。
+ * 端点全部由 CONFIG.configUrl 的 origin 推导（BASE = origin + /dsh-pet-7340）。
  * 入口仅加载：shared-core.js（经典 script）→ renderer.js（本文件）。
  */
 'use strict';
@@ -26,7 +27,7 @@ const S = window.PetShared;
 
 const params = new URLSearchParams(location.search);
 const CONFIG = {
-  configUrl: params.get('configUrl') || 'http://127.0.0.1:3080/dsh-pet-7340/config.jsonc',
+  configUrl: params.get('configUrl') || 'http://127.0.0.1:3080/dsh-pet-7340/config',
   scale: Number(params.get('scale') || '1'),
   petIndex: Number(params.get('petIndex') || '0'),
 };
@@ -36,10 +37,11 @@ const VIEW = {
   h: Number(params.get('workAreaH') || (window.screen && window.screen.availHeight) || 1080),
 };
 const ORIGIN = new URL(CONFIG.configUrl).origin;
-const withSuffix = (suffix) => CONFIG.configUrl.replace(/config\.jsonc$/, suffix);
-const BALANCE_URL = withSuffix('balance');
-const TRIGGER_URL = withSuffix('balance/trigger');
-const WHISPER_URL = withSuffix('whisper');
+/** 宿主 /dsh-pet-7340 前缀（所有业务端点都从这里拼，不再依赖 configUrl 的路径形态） */
+const BASE = ORIGIN + '/dsh-pet-7340';
+const BALANCE_URL = BASE + '/balance';
+const TRIGGER_URL = BASE + '/balance/trigger';
+const WHISPER_URL = BASE + '/whisper';
 const BUBBLE_DURATION_MS = 10 * 1000; // 余额/碎碎念气泡展示时长（与浏览器一致：定时自动消失，与动画解耦）
 // 窗口四周外扩 = 该比例 × 宠物尺寸：为气泡 / 未来可能的弹窗预留显示空间；
 // 外扩区透明且点击穿透（只有身体命中区可交互）。单点可调——按实际观感改这里。
@@ -48,7 +50,7 @@ const WINDOW_MARGIN_RATIO = 0.5;
 // ---------- 全局状态 ----------
 const rootEl = document.getElementById('root');
 const errorEl = document.getElementById('pet-error');
-let config = null; // ClientConfig（通过 shared 的 assertClientConfig 校验）
+let config = null; // { pets: 拍平后的成品实例列表, refreshSec: 主条目周期 }（loadConfig 填充）
 let sprites = []; // PetSprite[]（本窗口只装一只宠物）
 let balance = null; // BalanceState（本窗口单宠共用）
 let balanceTick = 0;
@@ -90,40 +92,22 @@ function scheduleReboot() {
 }
 
 async function loadConfig() {
+  // 唯一配置入口：宿主 /config 的成品聚合（host readAllConfig 已合并并保证绝对正确），
+  // 一步拉取 → 拍平成渲染列表，零校验零兜底
   const res = await fetch(CONFIG.configUrl, { cache: 'no-store' });
   if (!res.ok) throw new Error(`config http ${res.status}`);
-  const base = S.assertClientConfig(JSON.parse(S.stripJsonc(await res.text())));
-  // 用户覆盖层：pets / animations / animationWeights / eventsRefreshSec / notificationsEnabled
-  let user = {};
-  try {
-    const r = await fetch(withSuffix('config'), { cache: 'no-store' });
-    if (r.ok && r.status !== 204) user = await r.json().catch(() => ({}));
-  } catch {
-    /* 无用户层时忽略 */
-  }
-  // 合并后统一校验：用户层覆盖缺字段会静默丢配置，缺失即显式报错（与浏览器同一路径）
-  const cfg = S.assertClientConfig(S.applyUserOverrides(base, user));
-  // 额外宠物（pet pack）：pet/ 目录文件定义的宠物（自带**完整独立**动画池/权重）。
-  // host 已按同一套规则校验 + 过滤 id 冲突，这里信任其输出；端点失败/缺失时仅主宠物运行。
-  let extra = [];
-  try {
-    const re = await fetch(withSuffix('extra-pets'), { cache: 'no-store' });
-    if (re.ok && re.status !== 204) {
-      const body = await re.json().catch(() => null);
-      if (body && Array.isArray(body.pets)) extra = body.pets;
-    }
-  } catch {
-    /* extra-pets 拉取失败：仅主宠物运行（宿主日志已显式报错） */
-  }
-  if (extra.length) cfg.pets = S.mergeExtraPets(cfg.pets, extra);
-  return cfg;
+  const merged = await res.json();
+  return {
+    pets: S.flattenConfigPets(merged),
+    // 主条目周期（余额轮询等全局节奏；合并器已填内置默认）
+    refreshSec: (merged && merged.main && merged.main.eventsRefreshSec) || {},
+  };
 }
 
 // ---------- 单只宠物（行为与浏览器 PetCard 一致；纯逻辑来自 src/shared） ----------
 class PetSprite {
-  constructor(pet, cfg) {
-    this.pet = pet; // 这只宠物的配置段（pets[i]）
-    this.cfg = cfg; // 全量配置（ClientConfig）
+  constructor(pet) {
+    this.pet = pet; // 这只宠物的配置段（拍平后的成品实例，条目级字段已吹入：动画池/权重/周期）
     this.size = pet.size * CONFIG.scale;
     this.height = (this.size * 9) / 16;
     this.halfW = this.size / 2;
@@ -159,7 +143,8 @@ class PetSprite {
     this.animations = pet.animations || cfg.animations;
     this.weights = pet.animationWeights || cfg.animationWeights;
     // 素材根按 assetRoot（文件宠物 = 配置文件前缀，多实例共享同一素材目录）或宠物 id 回落
-    this.assetBase = withSuffix('thumb/' + encodeURIComponent(pet.assetRoot || pet.id) + '/');
+    // 素材根 = 条目 key（assetRoot，多实例共享同一素材目录）
+    this.assetBase = BASE + '/thumb/' + encodeURIComponent(pet.assetRoot || pet.id) + '/';
     this.front = 0; // 0 = A, 1 = B
     this.pending = null;
     this.gen = 0;
@@ -920,7 +905,7 @@ class PetSprite {
     }
     const m = S.mountChatDialog({
       petId: this.pet.id,
-      baseUrl: ORIGIN + '/dsh-pet-7340/chat',
+      baseUrl: BASE + '/chat',
       x: Math.max(4, this.hit.getBoundingClientRect().right + 6),
       y: Math.max(4, this.hit.getBoundingClientRect().top + 6),
       onReply: (reply) => {
@@ -959,7 +944,7 @@ class PetSprite {
   // ---- 碎碎念（每只宠物独立：按 eventsRefreshSec.whisper 周期轮询自己的句子，用本种类人设生成） ----
   startWhisperLoop() {
     if (!this.pet.whisperEnabled || this.whisperLoopTimer !== null) return;
-    const intervalMs = Math.max(1000, (this.cfg.eventsRefreshSec?.whisper ?? 3600) * 1000);
+    const intervalMs = Math.max(1000, (this.pet.eventsRefreshSec?.whisper ?? 3600) * 1000);
     const refresh = async () => {
       try {
         const petId = encodeURIComponent(this.pet.id);
@@ -1002,7 +987,7 @@ class PetSprite {
     const refresh = async () => {
       try {
         const petId = encodeURIComponent(this.pet.id);
-        const res = await fetch(withSuffix('broadcast') + '?pet=' + petId, { cache: 'no-store' });
+        const res = await fetch(BASE + '/broadcast' + '?pet=' + petId, { cache: 'no-store' });
         if (!res.ok) return;
         const d = (await res.json().catch(() => null)) || {};
         const ts = typeof d.ts === 'number' ? d.ts : 0;
@@ -1143,7 +1128,7 @@ function startLoops() {
 
   // 余额周期轮询：eventsRefreshSec.balance（秒），成功递增 balanceTick 触发事件动画
   if (anyBalanceEnabled) {
-    const intervalMs = Math.max(1000, (config.eventsRefreshSec?.balance ?? 1800) * 1000);
+    const intervalMs = Math.max(1000, (config.refreshSec?.balance ?? 1800) * 1000);
     const balanceLoop = async () => {
       try {
         const state = await S.fetchBalanceState(BALANCE_URL);
@@ -1219,7 +1204,7 @@ async function boot() {
       return;
     }
     for (const s of sprites) s.dispose();
-    sprites = [new PetSprite(pet, cfg)];
+    sprites = [new PetSprite(pet)];
     window.__dshPetDebug.configOk = true;
     window.__dshPetDebug.spriteCount = sprites.length;
     for (const s of sprites) s.playIdle();
@@ -1235,16 +1220,16 @@ function injectAssets() {
   const style = document.createElement('style');
   style.textContent =
     '@font-face{font-family:"ShangshouSoftCandy";src:url("' +
-    ORIGIN +
-    '/dsh-pet-7340/font/' +
+    BASE +
+    '/font/' +
     encodeURIComponent('上首软糖体') +
     '.ttf") format("truetype");font-display:swap;font-weight:400}' +
     '.pet-hit{cursor:url("' +
-    ORIGIN +
-    '/dsh-pet-7340/pic/cursor-grab.png") 16 16, grab}' +
+    BASE +
+    '/pic/cursor-grab.png") 16 16, grab}' +
     '.pet-hit.dragging{cursor:url("' +
-    ORIGIN +
-    '/dsh-pet-7340/pic/cursor-grabbing.png") 16 16, grabbing}';
+    BASE +
+    '/pic/cursor-grabbing.png") 16 16, grabbing}';
   document.head.appendChild(style);
   // 统一右键菜单样式（与浏览器注入同一份 MENU_CSS）
   const menuStyle = document.createElement('style');

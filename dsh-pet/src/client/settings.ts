@@ -1,14 +1,16 @@
 /**
  * 桌宠配置管理设置页（settings.section 插槽，id: pet-config）
  *
- * - 多开：管理多个桌宠，每个宠物独立 id/size/位置（corner + marginX/Y）
- * - 数据流：设置页持有「合并后的完整宠物列表」→ 保存时全量 PUT /dsh-pet-7340/config
- *   （用户覆盖层 = 完整列表，加载时全量替换默认，天然支持增删）
+ * - 多开：管理多个桌宠，每个宠物独立 id/name/size/位置（corner + marginX/Y）
+ * - 数据流：设置页持有「main 条目宠物列表」→ 保存时全量 PUT /dsh-pet-7340/config
+ *   （写用户层 main-config.json = 可编辑层，文件宠物永不回写）
+ * - 数据入口：配置由 host readAllConfig 合并为**成品**（GET /dsh-pet-7340/config），
+ *   设置页只读 main 条目（可编辑）+ 统计文件宠物条数，不做任何校验
  * - 即时生效：保存/恢复默认后调用 petBridge.sync 通知容器重新渲染，无需刷新页面
  *
  * 样式对齐官方设置页：max-width 720px、全走 --dsw-alias-* 语义 token（主题跟随）。
  */
-import { assertClientConfig, PET_DISPLAYS, stripJsonc } from '../shared/config';
+import { PET_DISPLAYS } from '../shared/config';
 import { NOTIFY_ICONS, reloadNotifications, requestNotificationPermission } from './notify';
 import type { Corner, Pet, PetDisplay } from '../shared/types';
 import type { ChangeEvent, CSSProperties, Dispatch, FunctionComponent, SetStateAction } from 'react';
@@ -16,8 +18,8 @@ import type * as ReactNS from 'react';
 import type { jsx } from 'react/jsx-runtime';
 
 /** 容器与设置页共享的桥（同一 bundle 单例）：
- * current=最新完整宠物列表（默认空）；sync=容器注册的重渲染回调（未注册时为无操作函数）；
- * template=config.jsonc 默认宠物模板（pets[0]），「添加宠物」用它作为默认配置 */
+ * current=最新完整宠物列表（成品拍平，默认空）；sync=容器注册的重渲染回调（未注册时为无操作函数）；
+ * template=main 条目的宠物[0]（「添加宠物」用它作为默认配置） */
 export const petBridge: {
   current: Pet[];
   sync: (pets: Pet[]) => void;
@@ -228,13 +230,16 @@ export function makePetConfigSection(rt: {
     const [permMsg, setPermMsg] = useState<{ kind: 'ok' | 'err' | ''; text: string }>({ kind: '', text: '' });
     useEffect(() => {
       let alive = true;
+      // 成品聚合的 main 条目已带合并后的 notificationsEnabled（用户手写值优先）
       fetch('/dsh-pet-7340/config')
-        .then((r) => (r.ok && r.status !== 204 ? r.json() : null))
+        .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (alive && d && typeof d.notificationsEnabled === 'boolean') setNotifyEnabled(d.notificationsEnabled);
+          const v =
+            d && d.main && typeof d.main.notificationsEnabled === 'boolean' ? d.main.notificationsEnabled : null;
+          if (alive && v !== null) setNotifyEnabled(v);
         })
         .catch(() => {
-          /* 无用户层时保持默认（true） */
+          /* 成品拉取失败时保持默认（true） */
         });
       return () => {
         alive = false;
@@ -325,19 +330,8 @@ export function makePetConfigSection(rt: {
       setBusy(true);
       setMsg({ kind: '', text: '' });
       try {
-        // 保留用户级配置（main-config.json）里手写的 notificationsEnabled，避免保存时被整体覆盖丢失
-        let notificationsEnabled: boolean | undefined;
-        try {
-          const prev = await fetch('/dsh-pet-7340/config');
-          if (prev.ok && prev.status !== 204) {
-            const pj = await prev.json().catch(() => null);
-            if (pj && typeof pj.notificationsEnabled === 'boolean') notificationsEnabled = pj.notificationsEnabled;
-          }
-        } catch {
-          /* 无用户层时忽略 */
-        }
-        const body: Record<string, unknown> = { pets: pets };
-        if (notificationsEnabled !== undefined) body.notificationsEnabled = notificationsEnabled;
+        // 通知总开关随保存一起写：UI 状态初始来自成品 main 条目（即保留用户手写值，不会静默覆盖）
+        const body: Record<string, unknown> = { pets: pets, notificationsEnabled: notifyEnabled };
         const res = await fetch('/dsh-pet-7340/config', {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
@@ -360,9 +354,10 @@ export function makePetConfigSection(rt: {
       setBusy(true);
       setMsg({ kind: '', text: '' });
       try {
+        // 删除用户层 → 重新拉成品（此时 main 条目 = 内置默认宠物列表）
         await fetch('/dsh-pet-7340/config', { method: 'DELETE' });
-        const defRes = await fetch('/dsh-pet-7340/config.jsonc');
-        const defs = assertClientConfig(JSON.parse(stripJsonc(await defRes.text()))).pets;
+        const merged = (await (await fetch('/dsh-pet-7340/config')).json()) as { main?: { pets?: Pet[] } } | null;
+        const defs = (merged?.main?.pets ?? []) as Pet[];
         setPets(defs.map((p) => ({ ...p, position: { ...p.position } })));
         setSelId(defs[0]?.id ?? '');
         petBridge.current = defs;

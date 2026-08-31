@@ -59,14 +59,14 @@ export interface Animations {
 }
 
 /** 一只宠物（与 jsonc pets[i] 同形，position 嵌套）。
- *  可选段（animations / animationWeights / extra / assetRoot）为「文件定义宠物」专用：
- *  - animations / animationWeights 由 `pet/<名>-config.json` 提供：该宠物所属**种类**的
- *    完整独立动画池与权重（不回落全局 config.animations——文件宠物即完整声明，配置即种类）。
- *    一个 `-config.json` 的 pets 数组可放该种类的**任意多只实例**，共享同一动画池与素材目录。
+ *  可选段（animations / animationWeights / extra / assetRoot / eventsRefreshSec）为渲染期派生或
+ *  「文件定义宠物」专用：
+ *  - animations / animationWeights / eventsRefreshSec：所属条目的条目级字段，由配置合并
+ *    （host readAllConfig / 客户端 flattenConfigPets）在拍平时吹进每只实例——多实例共享；
  *  - extra: true 标记该宠物由 pet/ 目录文件定义：设置页不可编辑、保存时排除，
- *    由合并逻辑（src/shared 的 mergeExtraPets）统一打标，**永不出现在持久化配置里**。
+ *    由拍平逻辑统一打标，**永不出现在持久化配置里**；
  *  - assetRoot: 素材目录名（= 配置文件前缀 `<名>`，即 `pet/<名>-animation/`）；素材 URL
- *    用它而不是 id——多实例共享同一素材目录。main 等常规宠物缺省回落自身 id。
+ *    用它而不是 id——多实例共享同一素材目录。main 等常规宠物并入 main 条目（assetRoot=main）。
  */
 export interface Pet {
   /** 唯一标识（程序定位用：素材/记忆/端点参数都按它；绝不重叠，冲突即配置错误） */
@@ -86,6 +86,8 @@ export interface Pet {
   animationWeights?: Weights;
   extra?: boolean;
   assetRoot?: string;
+  /** 渲染派生：所属条目的刷新周期（秒，事件名 → 间隔；合并时已填默认值） */
+  eventsRefreshSec?: Record<string, number>;
 }
 
 /** config.jsonc 全集——运行时直接使用（ANIM 即本类型） */

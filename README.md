@@ -91,7 +91,7 @@ dsh plugin --profile web add file:D:/path/to/dsh-pet
 - **依赖**：首次启动自动探测 Electron（`DSH_PET_ELECTRON_PATH` 环境变量 → 全局 npm → 常见安装位置），找不到时自动下载到 `~/.dsh/electron/`（可 `cd dsh-pet && npm run ensure:electron` 手动触发）；缺失时仅日志告警，不影响浏览器形态
 - **开关 = 每只宠物的必填字段 `display`**（四个值）：`web` = 仅浏览器 / `desktop` = 仅桌面 / `both` = 两者 / `none` = 都不显示；桌面模式渲染 display 含 desktop 的**全部**宠物（多开同屏，与浏览器一致）。在 DSH 设置页「桌宠配置」编辑，保存即时生效；缺失即配置错误，代码不做兜底
 - **实现**：浏览器 bundle 与桌面 `shared-core.js`（`src/shared` 的 iife 构建产物，`window.PetShared`）共用同一份纯逻辑；桌面端 `dsh-pet/runtime/electron-helper/` 只是薄壳（Electron 窗口 + 纯 DOM 渲染），行为差异为零
-- 本地调试：`cd dsh-pet && npm run start:desktop -- http://127.0.0.1:3080/dsh-pet-7340/config.jsonc`
+- 本地调试：`cd dsh-pet && npm run start:desktop -- http://127.0.0.1:3080/dsh-pet-7340/config`
 
 ## ⚙️ 余额展示（Balance）
 
